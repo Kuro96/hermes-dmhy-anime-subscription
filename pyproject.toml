@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "hermes-dmhy-anime-subscription"
+version = "0.1.0"
+description = "Scaffold for a Hermes DMHY anime subscription plugin."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+  { name = "Hermes DMHY Anime Subscription maintainers" }
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.0"
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[project.scripts]
+hermes-dmhy = "hermes_dmhy_anime_subscription.cli:main"

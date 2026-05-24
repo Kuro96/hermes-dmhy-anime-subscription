@@ -1,0 +1,14 @@
+name: dmhy-anime-subscription
+version: "0.1.0"
+description: Hermes plugin for safe DMHY anime subscription workflow orchestration.
+provides_tools:
+  - dmhy.validate_config
+  - dmhy.run_once_dry_run
+  - dmhy.run_once_apply
+  - dmhy.monitor_once
+  - dmhy.organize_once
+  - dmhy.list_state
+  - dmhy.list_failures
+  - dmhy.retry_failed_item
+provides_hooks:
+  - dmhy.schedule_tick
