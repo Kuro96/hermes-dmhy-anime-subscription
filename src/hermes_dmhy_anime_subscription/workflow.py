@@ -1,0 +1,416 @@
+"""Workflow orchestration for DMHY subscription runs."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+from typing import Callable, Iterable
+from urllib.request import urlopen
+
+from .config import ConfigError, OrganizerConfig, PluginConfig, load_config
+from .dmhy import parse_rss
+from .models import DownloadJobStatus, FailureRecord, NotificationEvent, OrganizerMode, ReleaseCandidate, SubscriptionRule
+from .monitor import OrganizerInput, TorrentSnapshot, monitor_downloads
+from .organizer import OrganizerResult, organize_media
+from .qbittorrent import QbittorrentClient, QbittorrentSubmitResult
+from .rules import DedupeDecision, dedupe_items, match_rules
+from .state import SubscriptionState
+from .webhook import WebhookDeliveryPlan, WebhookDispatchResult, WebhookNotifier, build_webhook_payload
+
+FeedFetcher = Callable[[str], str]
+QbittorrentClientFactory = Callable[[PluginConfig], QbittorrentClient]
+WebhookNotifierFactory = Callable[[PluginConfig], WebhookNotifier]
+OrganizerRunner = Callable[[OrganizerInput, PluginConfig], OrganizerResult]
+
+
+@dataclass(frozen=True, slots=True)
+class WorkflowDependencies:
+    feed_fetcher: FeedFetcher | None = None
+    qbittorrent_factory: QbittorrentClientFactory | None = None
+    webhook_factory: WebhookNotifierFactory | None = None
+    organizer_runner: OrganizerRunner | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateOutcome:
+    candidate: ReleaseCandidate
+    dedupe_decision: DedupeDecision
+    job_id: str
+    submit_result: QbittorrentSubmitResult | None
+    webhook_results: tuple[WebhookDispatchResult, ...] = ()
+    status: str = "skipped"
+
+
+@dataclass(frozen=True, slots=True)
+class RunOnceResult:
+    dry_run: bool
+    parsed_items: int
+    parse_errors: int
+    candidates: tuple[CandidateOutcome, ...]
+    events: tuple[NotificationEvent, ...]
+
+    @property
+    def planned_submissions(self) -> int:
+        return sum(1 for outcome in self.candidates if outcome.submit_result is not None and outcome.submit_result.dry_run)
+
+
+@dataclass(frozen=True, slots=True)
+class MonitorOnceResult:
+    organizer_inputs: tuple[OrganizerInput, ...]
+    events: tuple[NotificationEvent, ...]
+    failures: tuple[FailureRecord, ...]
+    organizer_results: tuple[OrganizerResult, ...] = ()
+    webhook_results: tuple[WebhookDispatchResult, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class OrganizeOnceResult:
+    result: OrganizerResult
+    webhook_results: tuple[WebhookDispatchResult, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class StateSummary:
+    processed: tuple[dict[str, object], ...]
+    pending: tuple[dict[str, object], ...]
+    failed: tuple[dict[str, object], ...]
+    retryable: tuple[dict[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RetryResult:
+    job_id: str
+    retried: bool
+    message: str
+
+
+def validate_config(config_path: str | os.PathLike[str]) -> PluginConfig:
+    return load_config(config_path)
+
+
+def run_once(
+    config_path: str | os.PathLike[str],
+    *,
+    dry_run: bool = True,
+    dependencies: WorkflowDependencies | None = None,
+) -> RunOnceResult:
+    config = load_config(config_path)
+    ensure_apply_safe(config, dry_run=dry_run)
+    deps = dependencies or WorkflowDependencies()
+    fetcher = deps.feed_fetcher or fetch_url_text
+    qbittorrent = deps.qbittorrent_factory(config) if deps.qbittorrent_factory else QbittorrentClient.from_config_env(config.qbittorrent)
+    notifier = deps.webhook_factory(config) if deps.webhook_factory else WebhookNotifier(config.webhook)
+    events: list[NotificationEvent] = []
+    outcomes: list[CandidateOutcome] = []
+    items = []
+    parse_errors = 0
+
+    for feed in config.dmhy.feeds:
+        parsed = parse_rss(fetcher(feed.url), source_feed=feed.name)
+        items.extend(parsed.items)
+        parse_errors += len(parsed.errors)
+
+    with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
+        for decision in dedupe_items(tuple(items)):
+            if not decision.accepted:
+                continue
+            if state.has_seen_item(decision.dedupe_key):
+                continue
+            candidate, rule = _first_candidate(decision.item, config.subscriptions.rules)
+            if candidate is None:
+                if not dry_run:
+                    state.record_seen_item(decision.item)
+                continue
+            job_id = job_id_for_candidate(candidate)
+            submit_result = qbittorrent.submit(candidate, rule=rule, dry_run=dry_run)
+            status = _job_status(submit_result, dry_run=dry_run)
+            if not dry_run:
+                state.upsert_job(
+                    job_id,
+                    dedupe_key=decision.dedupe_key,
+                    status=status,
+                    torrent_hash=decision.item.info_hash,
+                    retry_count=0,
+                    last_error=submit_result.message if not submit_result.success else None,
+                    metadata={
+                        "title": candidate.title,
+                        "rule_name": candidate.rule_name,
+                        "dry_run": dry_run,
+                        "submit_status": submit_result.status,
+                    },
+                )
+                if submit_result.success:
+                    state.record_seen_item(decision.item)
+                else:
+                    state.record_failure(job_id, "qbittorrent", submit_result.message, attempts=1, recoverable=submit_result.retryable)
+            event = NotificationEvent(
+                event_type="download_planned" if dry_run else "download_submitted",
+                title=candidate.title,
+                message=submit_result.message,
+                job_id=job_id,
+                severity="info" if submit_result.success else "error",
+                metadata={
+                    "rule_name": candidate.rule_name,
+                    "release_title": candidate.title,
+                    "guid": candidate.feed_item.guid,
+                    "infohash": candidate.feed_item.info_hash,
+                    "status": submit_result.status,
+                },
+            )
+            events.append(event)
+            webhook_result = _notify(notifier, event, dry_run=dry_run)
+            if not dry_run and webhook_result.failure is not None:
+                state.record_failure(webhook_result.failure.subject_id, webhook_result.failure.stage, webhook_result.failure.message, webhook_result.failure.attempts, webhook_result.failure.recoverable)
+            outcomes.append(CandidateOutcome(candidate, decision, job_id, submit_result, (webhook_result,), status=status.value))
+
+    return RunOnceResult(dry_run=dry_run, parsed_items=len(items), parse_errors=parse_errors, candidates=tuple(outcomes), events=tuple(events))
+
+
+def monitor_once(
+    config_path: str | os.PathLike[str],
+    snapshots: Iterable[TorrentSnapshot] = (),
+    *,
+    dry_run: bool = True,
+    organize: bool = True,
+    dependencies: WorkflowDependencies | None = None,
+) -> MonitorOnceResult:
+    config = load_config(config_path)
+    deps = dependencies or WorkflowDependencies()
+    notifier = deps.webhook_factory(config) if deps.webhook_factory else WebhookNotifier(config.webhook)
+    organizer_runner = deps.organizer_runner or (lambda organizer_input, loaded_config: organize_media(organizer_input, loaded_config.organizer))
+    with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
+        expected = tuple(str(job["job_id"]) for job in state.list_jobs(statuses=_ACTIVE_STATUSES))
+        result = monitor_downloads(state, snapshots, config.retry, expected_job_ids=expected)
+        organizer_results: list[OrganizerResult] = []
+        if organize:
+            for organizer_input in result.organizer_inputs:
+                organizer_result = organizer_runner(organizer_input, config)
+                organizer_results.append(organizer_result)
+                _record_organizer_actions(state, organizer_result, dry_run=dry_run)
+        webhook_results = tuple(_notify(notifier, event, dry_run=dry_run) for event in (*result.events, *[event for item in organizer_results for event in item.events]))
+        for webhook_result in webhook_results:
+            if not dry_run and webhook_result.failure is not None:
+                state.record_failure(webhook_result.failure.subject_id, webhook_result.failure.stage, webhook_result.failure.message, webhook_result.failure.attempts, webhook_result.failure.recoverable)
+    return MonitorOnceResult(result.organizer_inputs, result.events, result.failures, tuple(organizer_results), webhook_results)
+
+
+def organize_once(
+    config_path: str | os.PathLike[str],
+    organizer_input: OrganizerInput,
+    *,
+    dry_run: bool = True,
+    dependencies: WorkflowDependencies | None = None,
+) -> OrganizeOnceResult:
+    config = load_config(config_path)
+    ensure_apply_safe(config, dry_run=dry_run or config.organizer.mode is OrganizerMode.DRY_RUN)
+    deps = dependencies or WorkflowDependencies()
+    notifier = deps.webhook_factory(config) if deps.webhook_factory else WebhookNotifier(config.webhook)
+    organizer_runner = deps.organizer_runner or (lambda item, loaded_config: organize_media(item, loaded_config.organizer))
+    effective_config = _dry_run_organizer_config(config) if dry_run else config
+    result = organizer_runner(organizer_input, effective_config)
+    with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
+        _record_organizer_actions(state, result, dry_run=dry_run)
+    webhook_results = tuple(_notify(notifier, event, dry_run=dry_run) for event in result.events)
+    return OrganizeOnceResult(result, webhook_results)
+
+
+def plan_completed_dry_run(
+    config_path: str | os.PathLike[str],
+    run_result: RunOnceResult,
+    source_path: str,
+    *,
+    dependencies: WorkflowDependencies | None = None,
+) -> MonitorOnceResult:
+    config = load_config(config_path)
+    deps = dependencies or WorkflowDependencies()
+    notifier = deps.webhook_factory(config) if deps.webhook_factory else WebhookNotifier(config.webhook)
+    organizer_runner = deps.organizer_runner or (lambda organizer_input, loaded_config: organize_media(organizer_input, loaded_config.organizer))
+    snapshots = _completed_snapshots_from_run_result(run_result, source_path)
+    with SubscriptionState(":memory:") as state:
+        for outcome in run_result.candidates:
+            if outcome.submit_result is None or outcome.candidate.feed_item.info_hash is None:
+                continue
+            state.upsert_job(
+                outcome.job_id,
+                dedupe_key=outcome.dedupe_decision.dedupe_key,
+                status=DownloadJobStatus.PENDING,
+                torrent_hash=outcome.candidate.feed_item.info_hash,
+                retry_count=0,
+                metadata={
+                    "title": outcome.candidate.title,
+                    "rule_name": outcome.candidate.rule_name,
+                    "dry_run": True,
+                    "submit_status": outcome.submit_result.status,
+                },
+            )
+        expected = tuple(outcome.job_id for outcome in run_result.candidates if outcome.submit_result is not None)
+        result = monitor_downloads(state, snapshots, config.retry, expected_job_ids=expected)
+        organizer_results: list[OrganizerResult] = []
+        for organizer_input in result.organizer_inputs:
+            organizer_result = organizer_runner(organizer_input, _dry_run_organizer_config(config))
+            organizer_results.append(organizer_result)
+            _record_organizer_actions(state, organizer_result, dry_run=True)
+        webhook_results = tuple(_notify(notifier, event, dry_run=True) for event in (*result.events, *[event for item in organizer_results for event in item.events]))
+    return MonitorOnceResult(result.organizer_inputs, result.events, result.failures, tuple(organizer_results), webhook_results)
+
+
+def list_state(config_path: str | os.PathLike[str]) -> StateSummary:
+    config = load_config(config_path)
+    with SubscriptionState(config.state.path) as state:
+        jobs = state.list_jobs()
+        failures = state.list_failures()
+    processed_statuses = {DownloadJobStatus.SUBMITTED.value, DownloadJobStatus.QUEUED.value, DownloadJobStatus.DOWNLOADING.value, DownloadJobStatus.COMPLETED.value}
+    pending_statuses = {DownloadJobStatus.PENDING.value, DownloadJobStatus.STALLED.value, DownloadJobStatus.ERROR.value, DownloadJobStatus.MISSING.value, DownloadJobStatus.DELETED.value}
+    return StateSummary(
+        processed=tuple(job for job in jobs if str(job["status"]) in processed_statuses),
+        pending=tuple(job for job in jobs if str(job["status"]) in pending_statuses),
+        failed=tuple(job for job in jobs if str(job["status"]) == DownloadJobStatus.FAILED.value),
+        retryable=tuple(failure for failure in failures if bool(failure["recoverable"])),
+    )
+
+
+def retry_failed_item(config_path: str | os.PathLike[str], job_id: str) -> RetryResult:
+    config = load_config(config_path)
+    with SubscriptionState(config.state.path) as state:
+        job = state.get_job(job_id)
+        if job is None:
+            return RetryResult(job_id, False, "Job not found")
+        failures = state.list_failures(subject_id=job_id)
+        if not failures and job["status"] != DownloadJobStatus.FAILED.value:
+            return RetryResult(job_id, False, "Job is not failed")
+        if failures and not any(bool(failure["recoverable"]) for failure in failures):
+            return RetryResult(job_id, False, "Job failure is not retryable")
+        state.upsert_job(
+            job_id,
+            dedupe_key=str(job["dedupe_key"]),
+            status=DownloadJobStatus.PENDING,
+            torrent_hash=job.get("torrent_hash"),
+            retry_count=0,
+            last_error=None,
+            organizer_outcome=job.get("organizer_outcome"),
+            metadata={**dict(job["metadata"]), "manual_retry_requested_at": datetime.now(timezone.utc).isoformat()},
+        )
+    return RetryResult(job_id, True, "Job reset to pending for retry")
+
+
+def scheduler_tick(config_path: str | os.PathLike[str], *, dependencies: WorkflowDependencies | None = None) -> RunOnceResult:
+    return run_once(config_path, dry_run=True, dependencies=dependencies)
+
+
+def scheduling_guidance(config: PluginConfig) -> str:
+    jitter = f" with up to {config.polling.jitter_seconds} seconds of jitter" if config.polling.jitter_seconds else ""
+    return f"Call scheduler_tick once every {config.polling.interval_minutes} minutes{jitter}; do not install an in-process infinite loop."
+
+
+def ensure_apply_safe(config: PluginConfig, *, dry_run: bool) -> None:
+    if dry_run:
+        return
+    if not config.qbittorrent.username_env or not config.qbittorrent.password_env:
+        raise ConfigError("apply mode requires qbittorrent username_env and password_env")
+    if not os.environ.get(config.qbittorrent.username_env) or not os.environ.get(config.qbittorrent.password_env):
+        raise ConfigError("apply mode requires qBittorrent credential environment variables to be set")
+    if config.organizer.mode not in {OrganizerMode.APPLY, OrganizerMode.MOVE}:
+        raise ConfigError("apply mode requires organizer.mode to be apply or move")
+    if config.webhook.enabled and config.webhook.url_env and not os.environ.get(config.webhook.url_env):
+        raise ConfigError("apply mode requires webhook URL environment variable to be set when webhook is enabled")
+
+
+def fetch_url_text(url: str) -> str:
+    with urlopen(url, timeout=30) as response:  # nosec: runtime CLI path, tests inject fixture fetchers
+        return response.read().decode("utf-8", errors="replace")
+
+
+def snapshots_from_json(path: str | os.PathLike[str]) -> tuple[TorrentSnapshot, ...]:
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError("snapshot JSON must be a list")
+    return tuple(TorrentSnapshot(**item) for item in raw)
+
+
+def job_id_for_candidate(candidate: ReleaseCandidate) -> str:
+    key = candidate.feed_item.info_hash or candidate.feed_item.guid or candidate.feed_item.dedupe_key
+    safe = "".join(char.casefold() if char.isalnum() else "-" for char in key).strip("-")
+    return f"dmhy-{safe[:48]}"
+
+
+def _first_candidate(item, rules: tuple[SubscriptionRule, ...]) -> tuple[ReleaseCandidate | None, SubscriptionRule | None]:
+    for result in match_rules(item, rules):
+        if result.accepted and result.candidate is not None:
+            return result.candidate, result.rule
+    return None, None
+
+
+def _job_status(result: QbittorrentSubmitResult, *, dry_run: bool) -> DownloadJobStatus:
+    if result.success and dry_run:
+        return DownloadJobStatus.PENDING
+    if result.success:
+        return DownloadJobStatus.SUBMITTED
+    return DownloadJobStatus.FAILED if not result.retryable else DownloadJobStatus.ERROR
+
+
+def _dry_run_organizer_config(config: PluginConfig) -> PluginConfig:
+    if config.organizer.mode is OrganizerMode.DRY_RUN:
+        return config
+    organizer = OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=config.organizer.library_root, staging_root=config.organizer.staging_root)
+    return replace(config, organizer=organizer)
+
+
+def _state_path(config: PluginConfig, *, dry_run: bool) -> str | Path:
+    return ":memory:" if dry_run else config.state.path
+
+
+def _completed_snapshots_from_run_result(run_result: RunOnceResult, source_path: str) -> tuple[TorrentSnapshot, ...]:
+    snapshots: list[TorrentSnapshot] = []
+    for outcome in run_result.candidates:
+        info_hash = outcome.candidate.feed_item.info_hash
+        if not info_hash:
+            continue
+        snapshots.append(
+            TorrentSnapshot(
+                torrent_hash=info_hash,
+                name=outcome.candidate.title,
+                state="uploading",
+                progress=1.0,
+                content_path=source_path,
+            )
+        )
+    return tuple(snapshots)
+
+
+def _notify(notifier: WebhookNotifier, event: NotificationEvent, *, dry_run: bool) -> WebhookDispatchResult:
+    if not dry_run:
+        return notifier.notify(event, dry_run=False)
+    plan = WebhookDeliveryPlan(
+        url="",
+        redacted_url="<dry-run>",
+        payload=build_webhook_payload(event, dry_run=True),
+        dry_run=True,
+    )
+    return WebhookDispatchResult(
+        success=True,
+        status="planned",
+        message="Dry-run planned webhook delivery without HTTP mutation",
+        plan=plan,
+    )
+
+
+def _record_organizer_actions(state: SubscriptionState, result: OrganizerResult, *, dry_run: bool) -> None:
+    for action in result.actions:
+        if action.destination_path is None:
+            continue
+        outcome = "dry-run" if dry_run else action.status
+        state.record_organizer_outcome(result.job_id, outcome, str(action.source_path), str(action.destination_path))
+
+
+_ACTIVE_STATUSES = (
+    DownloadJobStatus.SUBMITTED.value,
+    DownloadJobStatus.QUEUED.value,
+    DownloadJobStatus.DOWNLOADING.value,
+    DownloadJobStatus.STALLED.value,
+    DownloadJobStatus.ERROR.value,
+    DownloadJobStatus.MISSING.value,
+    DownloadJobStatus.DELETED.value,
+)
