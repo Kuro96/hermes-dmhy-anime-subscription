@@ -1,0 +1,10 @@
+{
+  "dmhy": {"feeds": [{"name": "dmhy-main", "url": "https://share.dmhy.org/topics/rss/rss.xml"}]},
+  "subscriptions": {"rules": [{"name": "example-show", "include_keywords": ["Example"]}]},
+  "qbittorrent": {"endpoint": "http://127.0.0.1:8080"},
+  "polling": {"interval_minutes": 5, "jitter_seconds": 60},
+  "state": {"path": "var/state.sqlite3"},
+  "organizer": {"mode": "dry-run", "staging_root": "var/staging"},
+  "webhook": {"enabled": false, "url_env": "DMHY_WEBHOOK_URL"},
+  "retry": {"max_attempts": 3, "backoff_seconds": 300}
+}

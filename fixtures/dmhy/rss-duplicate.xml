@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Duplicate RSS</title>
+    <item>
+      <title>[ExampleSub] Duplicate Anime - 02 [1080p]</title>
+      <link>https://share.dmhy.org/topics/view/100003_duplicate_02.html</link>
+      <pubDate>Sun, 24 May 2026 12:00:00 +0000</pubDate>
+      <description>First duplicate copy</description>
+      <author>ExampleSub</author>
+      <category>動畫</category>
+      <guid>duplicate-guid-a</guid>
+      <enclosure url="magnet:?xt=urn:btih:FFFFEEEEEEDDDDCCCCBBBBAAAA99998888777766&amp;dn=DuplicateA" type="application/x-bittorrent" />
+    </item>
+    <item>
+      <title>[ExampleSub] Duplicate Anime - 02 [1080p] v2</title>
+      <link>https://share.dmhy.org/topics/view/100004_duplicate_02_v2.html</link>
+      <pubDate>Sun, 24 May 2026 12:05:00 +0000</pubDate>
+      <description>Second duplicate copy</description>
+      <author>ExampleSub</author>
+      <category>動畫</category>
+      <guid>duplicate-guid-b</guid>
+      <enclosure url="magnet:?xt=urn:btih:FFFFEEEEEEDDDDCCCCBBBBAAAA99998888777766&amp;dn=DuplicateB" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>

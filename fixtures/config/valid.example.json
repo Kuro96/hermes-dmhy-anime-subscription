@@ -1,0 +1,72 @@
+{
+  "dmhy": {
+    "feeds": [
+      {
+        "name": "dmhy-main",
+        "url": "https://share.dmhy.org/topics/rss/rss.xml"
+      }
+    ]
+  },
+  "subscriptions": {
+    "rules": [
+      {
+        "name": "example-show",
+        "include_keywords": [
+          "Example Show",
+          "1080p"
+        ],
+        "exclude_keywords": [
+          "720p"
+        ],
+        "team_names": [
+          "ExampleSub"
+        ],
+        "resolutions": [
+          "1080p"
+        ],
+        "categories": [
+          "動畫"
+        ],
+        "feed_names": [
+          "dmhy-main"
+        ],
+        "episode_mode": "episode",
+        "allow_packs": false,
+        "category": "anime",
+        "priority": 10,
+        "enabled": true
+      }
+    ]
+  },
+  "qbittorrent": {
+    "endpoint": "http://127.0.0.1:8080",
+    "username_env": "QBITTORRENT_USERNAME",
+    "password_env": "QBITTORRENT_PASSWORD",
+    "category": "anime",
+    "tags": [
+      "dmhy",
+      "subscription"
+    ],
+    "save_path": "var/qbittorrent-downloads"
+  },
+  "polling": {
+    "interval_minutes": 15,
+    "jitter_seconds": 60
+  },
+  "state": {
+    "path": "var/state/dmhy-subscription.sqlite3"
+  },
+  "organizer": {
+    "mode": "dry-run",
+    "library_root": "var/library-sandbox",
+    "staging_root": "var/staging"
+  },
+  "webhook": {
+    "enabled": false,
+    "url_env": "DMHY_WEBHOOK_URL"
+  },
+  "retry": {
+    "max_attempts": 3,
+    "backoff_seconds": 300
+  }
+}

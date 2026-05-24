@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Missing Enclosure RSS</title>
+    <item>
+      <title>[ExampleSub] Missing Magnet Anime - 03 [1080p]</title>
+      <link>https://share.dmhy.org/topics/view/100005_missing_magnet_03.html</link>
+      <pubDate>Sun, 24 May 2026 13:00:00 +0000</pubDate>
+      <description>No enclosure should be recoverable</description>
+      <author>ExampleSub</author>
+      <category>動畫</category>
+      <guid>missing-enclosure-guid</guid>
+    </item>
+  </channel>
+</rss>

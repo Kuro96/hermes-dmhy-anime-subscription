@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Anime RSS</title>
+    <link>https://share.dmhy.org/topics/rss/rss.xml</link>
+    <description>Anime releases</description>
+    <item>
+      <title>[ExampleSub] Example Anime - 01 [1080p][CHS]</title>
+      <link>https://share.dmhy.org/topics/view/100001_example_anime_01.html</link>
+      <pubDate>Sun, 24 May 2026 10:30:00 +0000</pubDate>
+      <description>Example release description</description>
+      <author>ExampleSub</author>
+      <category>動畫</category>
+      <guid>https://share.dmhy.org/topics/view/100001_example_anime_01.html</guid>
+      <enclosure url="magnet:?xt=urn:btih:ABCDEF1234567890ABCDEF1234567890ABCDEF12&amp;dn=Example" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Season Pack RSS</title>
+    <link>https://share.dmhy.org/topics/rss/sort_id/31/rss.xml</link>
+    <description>Season pack releases</description>
+    <item>
+      <title>[ExampleSub] Example Anime 季度全集 [1080p]</title>
+      <link>https://share.dmhy.org/topics/view/100002_example_anime_batch.html?sort_id=31</link>
+      <pubDate>Sun, 24 May 2026 11:00:00 +0000</pubDate>
+      <description>Quarterly complete season pack</description>
+      <author>ExampleSub</author>
+      <category>季度全集</category>
+      <guid>season-pack-100002</guid>
+      <enclosure url="magnet:?xt=urn:btih:MFRGGZDFMZTWQ2LKNNWG23TPOI&amp;dn=SeasonPack" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
