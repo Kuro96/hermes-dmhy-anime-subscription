@@ -108,6 +108,60 @@ def test_multifile_torrent_ignores_extras_and_preserves_subtitles(tmp_path):
     assert trailer.exists()
 
 
+def test_bangumi_chinese_title_uses_flat_series_directory(tmp_path):
+    source = tmp_path / "downloads" / "frieren"
+    source.mkdir(parents=True)
+    video = source / "[Subs] Frieren Beyond Journeys End - 07 [1080p].mkv"
+    video.write_bytes(b"video")
+    subtitle = video.with_suffix(".ass")
+    subtitle.write_text("subtitle", encoding="utf-8")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title="[Subs] Frieren Beyond Journeys End - 07 [1080p]"),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+        bangumi_lookup=lambda title: "葬送的芙莉莲",
+    )
+
+    destinations = {action.destination_path for action in result.actions}
+    assert destinations == {
+        library / "葬送的芙莉莲" / "Frieren Beyond Journeys End - S01E07 - Subs [1080p].mkv",
+        library / "葬送的芙莉莲" / "Frieren Beyond Journeys End - S01E07 - Subs [1080p].ass",
+    }
+
+
+def test_bangumi_lookup_without_chinese_title_keeps_season_layout(tmp_path):
+    source = tmp_path / "downloads" / "[Subs] Frieren Beyond Journeys End - 08 [1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title="[Subs] Frieren Beyond Journeys End - 08 [1080p]"),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+        bangumi_lookup=lambda title: None,
+    )
+
+    assert result.actions[0].destination_path == library / "Frieren Beyond Journeys End" / "Season 01" / "Frieren Beyond Journeys End - S01E08 - Subs [1080p].mkv"
+
+
+def test_bangumi_lookup_uses_season_aware_release_title_for_s02(tmp_path):
+    source = tmp_path / "downloads" / "[Subs] Example Show S02E03 [1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+    calls = []
+
+    result = organize_media(
+        _organizer_input(source, title="[Subs] Example Show S02E03 [1080p]"),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+        bangumi_lookup=lambda title: calls.append(title) or "示例 第二季",
+    )
+
+    assert calls == ["[Subs] Example Show S02E03 [1080p]"]
+    assert result.actions[0].destination_path == library / "示例 第二季" / "Example Show - S02E03 - Subs [1080p].mkv"
+
+
 def test_unparsed_episode_falls_back_to_unsorted_with_warning_event(tmp_path):
     source = tmp_path / "downloads" / "[Subs] Example OVA [1080p].mkv"
     source.parent.mkdir()

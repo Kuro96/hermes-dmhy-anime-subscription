@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 import shutil
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .config import OrganizerConfig
@@ -15,6 +16,7 @@ VIDEO_EXTENSIONS = frozenset({".mkv", ".mp4", ".avi", ".mov", ".m4v"})
 SUBTITLE_EXTENSIONS = frozenset({".ass", ".srt", ".ssa", ".vtt"})
 IGNORED_NAME_PARTS = frozenset({"sample", "extras", "extra", "trailer", "ncop", "nced"})
 DEFAULT_SEASON = 1
+BangumiLookup = Callable[[str], str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,13 +49,16 @@ class OrganizerResult:
 @dataclass(frozen=True, slots=True)
 class _EpisodeInfo:
     title: str
+    lookup_title: str
+    library_title: str
+    flat_library: bool
     season: int
     episode: int | None
     release_group: str
     quality: str
 
 
-def organize_media(organizer_input: OrganizerInput, config: OrganizerConfig) -> OrganizerResult:
+def organize_media(organizer_input: OrganizerInput, config: OrganizerConfig, *, bangumi_lookup: BangumiLookup | None = None) -> OrganizerResult:
     """Plan or apply safe moves into a Jellyfin/Plex/Emby-compatible layout."""
 
     source_root = Path(organizer_input.source_path)
@@ -62,9 +67,13 @@ def organize_media(organizer_input: OrganizerInput, config: OrganizerConfig) -> 
     videos = _selected_video_files(sources)
     subtitles = _selected_subtitles(sources, videos)
     actions: list[OrganizerAction] = []
+    infos: dict[Path, _EpisodeInfo] = {}
+    bangumi_titles: dict[str, str | None] = {}
 
     for video in videos:
         info = _episode_info(video, organizer_input.title, organizer_input.metadata)
+        info = _with_bangumi_title(info, bangumi_lookup, bangumi_titles)
+        infos[video] = info
         destination = _video_destination(library_root, info, video.suffix)
         action = _plan_action(video, destination, library_root, config.mode, "video", info)
         if action.status == "planned" and config.mode in {OrganizerMode.APPLY, OrganizerMode.MOVE}:
@@ -75,7 +84,10 @@ def organize_media(organizer_input: OrganizerInput, config: OrganizerConfig) -> 
         video = _matching_video(subtitle, videos) or videos[0] if videos else None
         if video is None:
             continue
-        info = _episode_info(video, organizer_input.title, organizer_input.metadata)
+        info = infos.get(video)
+        if info is None:
+            info = _episode_info(video, organizer_input.title, organizer_input.metadata)
+            info = _with_bangumi_title(info, bangumi_lookup, bangumi_titles)
         destination = _subtitle_destination(library_root, info, video, subtitle)
         action = _plan_action(subtitle, destination, library_root, config.mode, "subtitle", info)
         if action.status == "planned" and config.mode in {OrganizerMode.APPLY, OrganizerMode.MOVE}:
@@ -149,11 +161,31 @@ def _episode_info(path: Path, title: str, metadata: dict[str, object]) -> _Episo
     series_title = _metadata_text(metadata, "series_title") or _series_title(title, path.stem, release_group, quality)
     return _EpisodeInfo(
         title=_sanitize_segment(series_title) or "Unknown Series",
+        lookup_title=_lookup_title(title, path.stem, series_title),
+        library_title=_sanitize_segment(series_title) or "Unknown Series",
+        flat_library=False,
         season=season,
         episode=episode,
         release_group=_sanitize_segment(release_group) or "Unknown",
         quality=_sanitize_segment(quality) or "Unknown",
     )
+
+
+def _with_bangumi_title(info: _EpisodeInfo, bangumi_lookup: BangumiLookup | None, cache: dict[str, str | None]) -> _EpisodeInfo:
+    if bangumi_lookup is None:
+        return info
+    if info.lookup_title not in cache:
+        try:
+            cache[info.lookup_title] = bangumi_lookup(info.lookup_title)
+        except Exception:
+            cache[info.lookup_title] = None
+    chinese_title = cache[info.lookup_title]
+    if not chinese_title:
+        return info
+    library_title = _sanitize_segment(chinese_title)
+    if not library_title:
+        return info
+    return replace(info, library_title=library_title, flat_library=True)
 
 
 def _parse_episode(text: str) -> tuple[int, int | None]:
@@ -188,6 +220,23 @@ def _series_title(title: str, stem: str, release_group: str, quality: str) -> st
     return re.sub(r"[\s_.-]+", " ", value).strip()
 
 
+def _lookup_title(title: str, stem: str, series_title: str) -> str:
+    for value in (title, stem):
+        value = value.strip()
+        if value and _has_season_context(value):
+            return value
+    return title.strip() or stem.strip() or series_title
+
+
+def _has_season_context(value: str) -> bool:
+    return bool(
+        re.search(r"\bS\d{1,2}(?:\s*E\d{1,3})?\b", value, flags=re.IGNORECASE)
+        or re.search(r"\bSeason\s*\d{1,2}\b", value, flags=re.IGNORECASE)
+        or re.search(r"\b\d{1,2}(?:st|nd|rd|th)\s+Season\b", value, flags=re.IGNORECASE)
+        or re.search(r"第\s*\d{1,2}\s*[季期]", value)
+    )
+
+
 def _metadata_text(metadata: dict[str, object], key: str) -> str | None:
     value = metadata.get(key)
     if isinstance(value, str) and value.strip():
@@ -197,6 +246,8 @@ def _metadata_text(metadata: dict[str, object], key: str) -> str | None:
 
 def _video_destination(library_root: Path, info: _EpisodeInfo, suffix: str) -> Path:
     if info.episode is None:
+        if info.flat_library:
+            return library_root / info.library_title / f"{info.title}{suffix.casefold()}"
         return library_root / "_Unsorted" / info.title / f"{info.title}{suffix.casefold()}"
     return _season_directory(library_root, info) / f"{info.title} - S{info.season:02d}E{info.episode:02d} - {info.release_group} [{info.quality}]{suffix.casefold()}"
 
@@ -207,7 +258,9 @@ def _subtitle_destination(library_root: Path, info: _EpisodeInfo, video: Path, s
 
 
 def _season_directory(library_root: Path, info: _EpisodeInfo) -> Path:
-    return library_root / info.title / f"Season {info.season:02d}"
+    if info.flat_library:
+        return library_root / info.library_title
+    return library_root / info.library_title / f"Season {info.season:02d}"
 
 
 def _plan_action(source: Path, destination: Path, library_root: Path, mode: OrganizerMode, media_type: str, info: _EpisodeInfo) -> OrganizerAction:

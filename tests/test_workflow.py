@@ -5,9 +5,10 @@ from pathlib import Path
 import pytest
 
 from hermes_dmhy_anime_subscription import cli, register
+from hermes_dmhy_anime_subscription import workflow
 from hermes_dmhy_anime_subscription.config import load_config
 from hermes_dmhy_anime_subscription.models import DownloadJobStatus, OrganizerMode
-from hermes_dmhy_anime_subscription.monitor import OrganizerInput
+from hermes_dmhy_anime_subscription.monitor import OrganizerInput, TorrentSnapshot
 from hermes_dmhy_anime_subscription.organizer import OrganizerAction, OrganizerResult
 from hermes_dmhy_anime_subscription.qbittorrent import QbittorrentSubmitResult, QbittorrentTorrent, plan_qbittorrent_submission
 from hermes_dmhy_anime_subscription.state import SubscriptionState
@@ -527,6 +528,62 @@ def test_production_tick_returns_failure_summary_when_qbittorrent_listing_fails(
         "message": "qBittorrent unavailable",
         "retryable": True,
     }
+
+
+def test_monitor_once_production_injects_bangumi_lookup_into_default_organizer(tmp_path):
+    config_path = _config(tmp_path)
+    source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-monitor",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+            metadata={"title": "[ExampleSub] Example Anime - 01 [1080p][CHS]"},
+        )
+    calls = []
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+                name="[ExampleSub] Example Anime - 01 [1080p][CHS]",
+                state="uploading",
+                progress=1.0,
+                content_path=str(source),
+                completed_at=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(bangumi_lookup=lambda title: calls.append(title) or "示例动画"),
+    )
+
+    assert calls == ["[ExampleSub] Example Anime - 01 [1080p][CHS]"]
+    assert result.organizer_results[0].actions[0].destination_path == tmp_path / "library" / "示例动画" / "Example Anime - S01E01 - ExampleSub [1080p].mkv"
+
+
+def test_plan_completed_dry_run_without_dependency_suppresses_default_bangumi_lookup(tmp_path, monkeypatch):
+    config_path = _config(tmp_path)
+    source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    fake_qbit = FakeQbittorrentClient()
+    run_result = run_once(
+        config_path,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+    monkeypatch.setattr(workflow, "lookup_chinese_title", lambda title: pytest.fail(f"unexpected Bangumi lookup for {title}"))
+
+    result = plan_completed_dry_run(config_path, run_result, str(source))
+
+    assert len(result.organizer_results) == 1
+    assert result.organizer_results[0].actions[0].destination_path == tmp_path / "library" / "Example Anime" / "Season 01" / "Example Anime - S01E01 - ExampleSub [1080p].mkv"
 
 
 def test_organize_once_dry_run_forces_planning_even_when_config_mode_moves(tmp_path):
