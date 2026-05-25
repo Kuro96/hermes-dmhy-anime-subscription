@@ -58,6 +58,17 @@ class FakeProductionQbittorrentClient(FakeQbittorrentClient):
         return self.torrents
 
 
+class FailingProductionQbittorrentClient(FakeQbittorrentClient):
+    def __init__(self, message):
+        super().__init__()
+        self.message = message
+        self.list_calls = []
+
+    def list_torrents(self, *, category=None, all_categories=False):
+        self.list_calls.append((category, all_categories))
+        raise RuntimeError(self.message)
+
+
 class SequenceQbittorrentClient:
     def __init__(self, config, statuses):
         self.config = config
@@ -242,6 +253,35 @@ def test_snapshots_match_base32_jobs_to_hex_qbittorrent_hash_and_strip_mkv_title
     assert snapshots[0].torrent_hash == base32_hash
     assert snapshots[0].metadata["qbittorrent_hash"] == "63b8b04640befcd202c9047a20e925e1573fa5e9"
     assert snapshots[0].name == "[Nekomoe kissaten&LoliHouse] LIAR GAME - 07 [1080p]"
+
+
+def test_snapshots_preserve_qbittorrent_directory_content_path_with_dots(tmp_path):
+    config_path = _config(tmp_path)
+    config = load_config(config_path)
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "dmhy-abcdef1234567890abcdef1234567890abcdef12",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+        )
+
+    snapshots = snapshots_from_qbittorrent_torrents(
+        config,
+        (
+            QbittorrentTorrent(
+                torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+                name="My.Show.S01.1080p",
+                state="uploading",
+                progress=1.0,
+                save_path=str(tmp_path / "downloads"),
+                content_path="My.Show.S01.1080p",
+            ),
+        ),
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].name == "My.Show.S01.1080p"
 
 
 def test_snapshots_ignore_unknown_qbittorrent_completion_timestamp(tmp_path):
@@ -455,6 +495,38 @@ def test_production_tick_does_not_organize_qbittorrent_save_root_without_content
     assert job["organizer_outcome"] is None
     assert job["metadata"]["save_path"] == str(download_root)
     assert job["metadata"]["content_path"] is None
+
+
+def test_production_tick_returns_failure_summary_when_qbittorrent_listing_fails(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    qbit = FailingProductionQbittorrentClient("qBittorrent unavailable")
+    organizer_calls = []
+
+    result = production_tick(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: "<rss><channel></channel></rss>",
+            qbittorrent_factory=lambda _config: qbit,
+            organizer_runner=lambda item, config: organizer_calls.append(item)
+            or OrganizerResult(item.job_id, config.organizer.mode, ()),
+        ),
+    )
+
+    summary = result.summary()
+    assert result.ok is False
+    assert result.torrent_count == 0
+    assert result.snapshots == ()
+    assert result.monitor_result is None
+    assert organizer_calls == []
+    assert qbit.list_calls == [(None, True)]
+    assert summary["qbit"]["failure"] == {
+        "stage": "list_torrents",
+        "message": "qBittorrent unavailable",
+        "retryable": True,
+    }
 
 
 def test_organize_once_dry_run_forces_planning_even_when_config_mode_moves(tmp_path):

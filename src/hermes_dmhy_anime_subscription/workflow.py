@@ -74,6 +74,7 @@ class ProductionTickResult:
     torrent_count: int = 0
     snapshots: tuple[TorrentSnapshot, ...] = ()
     monitor_result: MonitorOnceResult | None = None
+    qbit_failure: dict[str, object] | None = None
 
     @property
     def ok(self) -> bool:
@@ -84,7 +85,7 @@ class ProductionTickResult:
         webhook_failures = any(result.failure is not None for outcome in self.run_result.candidates for result in outcome.webhook_results)
         if self.monitor_result is not None:
             webhook_failures = webhook_failures or any(result.failure is not None for result in self.monitor_result.webhook_results)
-        return not (submit_failures or monitor_failures or webhook_failures)
+        return not (submit_failures or monitor_failures or webhook_failures or self.qbit_failure is not None)
 
     def summary(self) -> dict[str, object]:
         return {
@@ -99,6 +100,7 @@ class ProductionTickResult:
             "qbit": {
                 "torrent_count": self.torrent_count,
                 "snapshots_for_active_jobs": len(self.snapshots),
+                "failure": self.qbit_failure,
             },
             "monitor": None
             if self.monitor_result is None
@@ -277,7 +279,14 @@ def production_tick(
         return ProductionTickResult(dry_run=True, run_result=run_result)
 
     qbittorrent = deps.qbittorrent_factory(config) if deps.qbittorrent_factory else QbittorrentClient.from_config_env(config.qbittorrent)
-    torrents = _list_monitor_torrents(qbittorrent, config)
+    try:
+        torrents = _list_monitor_torrents(qbittorrent, config)
+    except RuntimeError as exc:
+        return ProductionTickResult(
+            dry_run=False,
+            run_result=run_result,
+            qbit_failure={"stage": "list_torrents", "message": str(exc), "retryable": True},
+        )
     snapshots = snapshots_from_qbittorrent_torrents(config, torrents, job_ids=pre_active_job_ids)
     monitor_result = monitor_once(config_path, snapshots=snapshots, dry_run=False, organize=True, dependencies=deps, expected_job_ids=pre_active_job_ids)
     return ProductionTickResult(
@@ -514,7 +523,9 @@ def _infohash_to_qbittorrent_hash(value: str) -> str:
 
 def _snapshot_title(torrent: QbittorrentTorrent) -> str:
     source = torrent.content_path or torrent.name
-    title = Path(source).stem if source else ""
+    leaf = source.replace("\\", "/").rsplit("/", 1)[-1] if source else ""
+    suffix = Path(leaf).suffix.casefold()
+    title = leaf[: -len(suffix)] if suffix in _MEDIA_SUFFIXES else leaf
     return title or torrent.name
 
 def _first_candidate(item, rules: tuple[SubscriptionRule, ...]) -> tuple[ReleaseCandidate | None, SubscriptionRule | None]:
@@ -595,3 +606,6 @@ _ACTIVE_STATUSES = (
     DownloadJobStatus.MISSING.value,
     DownloadJobStatus.DELETED.value,
 )
+
+
+_MEDIA_SUFFIXES = frozenset({".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".ts"})
