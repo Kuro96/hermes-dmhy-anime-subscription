@@ -232,7 +232,7 @@ class QbittorrentClient:
             if auth_error is not None:
                 raise RuntimeError(auth_error.message)
         selected_category = None if all_categories else (self.config.category if category is None else category)
-        values = {"category": selected_category} if selected_category else {}
+        values = {"category": selected_category} if selected_category is not None else {}
         try:
             response = self._get("/api/v2/torrents/info", values)
         except _RetryableTransportError as exc:

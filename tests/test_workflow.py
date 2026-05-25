@@ -244,6 +244,36 @@ def test_snapshots_match_base32_jobs_to_hex_qbittorrent_hash_and_strip_mkv_title
     assert snapshots[0].name == "[Nekomoe kissaten&LoliHouse] LIAR GAME - 07 [1080p]"
 
 
+def test_snapshots_ignore_unknown_qbittorrent_completion_timestamp(tmp_path):
+    config_path = _config(tmp_path)
+    config = load_config(config_path)
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "dmhy-abcdef1234567890abcdef1234567890abcdef12",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+        )
+
+    snapshots = snapshots_from_qbittorrent_torrents(
+        config,
+        (
+            QbittorrentTorrent(
+                torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+                name="Example.mkv",
+                state="uploading",
+                progress=1.0,
+                save_path=str(tmp_path / "downloads"),
+                content_path=str(tmp_path / "downloads" / "Example.mkv"),
+                completion_on=-1,
+            ),
+        ),
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].completed_at is None
+
+
 def test_production_tick_apply_does_not_mark_new_submissions_missing_in_same_tick(tmp_path, monkeypatch):
     config_path = _config(tmp_path, organizer_mode="move")
     monkeypatch.setenv("QBITTORRENT_USERNAME", "user")

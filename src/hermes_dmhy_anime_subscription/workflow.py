@@ -342,7 +342,7 @@ def snapshots_from_qbittorrent_torrents(
         if torrent is None:
             continue
         completed_at = None
-        if torrent.completion_on:
+        if torrent.completion_on and torrent.completion_on > 0:
             completed_at = datetime.fromtimestamp(int(torrent.completion_on), tz=timezone.utc)
         snapshots.append(
             TorrentSnapshot(
