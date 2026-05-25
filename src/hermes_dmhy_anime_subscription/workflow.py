@@ -296,14 +296,10 @@ def _active_job_ids(config: PluginConfig) -> tuple[str, ...]:
 
 
 def _list_monitor_torrents(qbittorrent: QbittorrentClient, config: PluginConfig) -> tuple[QbittorrentTorrent, ...]:
-    with SubscriptionState(config.state.path) as state:
-        jobs = state.list_jobs(statuses=_ACTIVE_STATUSES)
-    categories = _monitor_categories(config, jobs)
     by_hash: dict[str, QbittorrentTorrent] = {}
-    for category in (*categories, ""):
-        for torrent in qbittorrent.list_torrents(category=category):
-            if torrent.torrent_hash:
-                by_hash[torrent.torrent_hash.lower()] = torrent
+    for torrent in qbittorrent.list_torrents(all_categories=True):
+        if torrent.torrent_hash:
+            by_hash[torrent.torrent_hash.lower()] = torrent
     return tuple(by_hash.values())
 
 

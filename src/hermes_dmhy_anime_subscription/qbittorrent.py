@@ -218,14 +218,20 @@ class QbittorrentClient:
         )
 
 
-    def list_torrents(self, *, category: str | None = None) -> tuple[QbittorrentTorrent, ...]:
-        """Return qBittorrent torrent states for monitoring without mutating torrents."""
+    def list_torrents(self, *, category: str | None = None, all_categories: bool = False) -> tuple[QbittorrentTorrent, ...]:
+        """Return qBittorrent torrent states for monitoring without mutating torrents.
+
+        By default this lists the configured qBittorrent category for backwards
+        compatibility with the submission config. Pass ``all_categories=True``
+        to omit the category query parameter and fetch every torrent visible to
+        the qBittorrent API.
+        """
 
         if self._auth_enabled:
             auth_error = self.login()
             if auth_error is not None:
                 raise RuntimeError(auth_error.message)
-        selected_category = self.config.category if category is None else category
+        selected_category = None if all_categories else (self.config.category if category is None else category)
         values = {"category": selected_category} if selected_category else {}
         try:
             response = self._get("/api/v2/torrents/info", values)

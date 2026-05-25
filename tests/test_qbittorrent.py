@@ -134,6 +134,22 @@ def test_list_torrents_logs_in_and_filters_configured_category():
     assert torrents[0].content_path == "/downloads/anime/Example.mkv"
 
 
+def test_list_torrents_all_categories_omits_category_filter():
+    transport = MockTransport(
+        [
+            QbittorrentHttpResponse(status=200, body="Ok."),
+            QbittorrentHttpResponse(status=200, body="[]"),
+        ]
+    )
+
+    QbittorrentClient(_config_with_auth(), username="user", password="fixture-pass", transport=transport).list_torrents(all_categories=True)
+
+    assert [request.url for request in transport.requests] == [
+        "http://127.0.0.1:8080/api/v2/auth/login",
+        "http://127.0.0.1:8080/api/v2/torrents/info",
+    ]
+
+
 def _config() -> QbittorrentConfig:
     return QbittorrentConfig(
         endpoint="http://127.0.0.1:8080",

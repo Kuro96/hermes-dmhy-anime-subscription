@@ -53,8 +53,8 @@ class FakeProductionQbittorrentClient(FakeQbittorrentClient):
         self.torrents = tuple(torrents)
         self.list_calls = []
 
-    def list_torrents(self, *, category=None):
-        self.list_calls.append(category)
+    def list_torrents(self, *, category=None, all_categories=False):
+        self.list_calls.append((category, all_categories))
         return self.torrents
 
 
@@ -281,7 +281,7 @@ def test_production_tick_apply_does_not_mark_new_submissions_missing_in_same_tic
 
     assert result.dry_run is False
     assert result.torrent_count == 1
-    assert qbit.list_calls == ["anime", ""]
+    assert qbit.list_calls == [(None, True)]
     assert len(result.snapshots) == 0
     assert result.monitor_result is not None
     assert len(result.monitor_result.organizer_inputs) == 0
@@ -403,7 +403,7 @@ def test_register_tolerates_partial_hermes_contexts_and_exposes_tools():
 
 
 
-def test_production_tick_lists_rule_specific_qbittorrent_category(tmp_path, monkeypatch):
+def test_production_tick_lists_all_qbittorrent_torrents_to_avoid_stale_category_misses(tmp_path, monkeypatch):
     config_path = _config(tmp_path, organizer_mode="move")
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     raw["subscriptions"]["rules"][0]["category"] = "rule-anime"
@@ -436,7 +436,7 @@ def test_production_tick_lists_rule_specific_qbittorrent_category(tmp_path, monk
         ),
     )
 
-    assert qbit.list_calls == ["rule-anime", ""]
+    assert qbit.list_calls == [(None, True)]
 
 
 def test_cli_schedule_tick_apply_prints_json_summary(tmp_path, monkeypatch, capsys):
