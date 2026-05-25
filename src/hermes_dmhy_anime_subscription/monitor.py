@@ -189,7 +189,25 @@ def _mark_completed(
         return _SnapshotOutcome()
 
     completed_at = snapshot.completed_at or observed_at
-    source_path = snapshot.content_path or snapshot.save_path or snapshot.name
+    if not snapshot.content_path:
+        state.upsert_job(
+            job["job_id"],
+            dedupe_key=job["dedupe_key"],
+            status=DownloadJobStatus.COMPLETED,
+            torrent_hash=snapshot.torrent_hash,
+            retry_count=int(job["retry_count"]),
+            last_error=None,
+            organizer_outcome=job["organizer_outcome"],
+            metadata=metadata,
+        )
+        events = (
+            ()
+            if job["status"] == DownloadJobStatus.COMPLETED.value
+            else (_event("download_completed", job, snapshot, "completed", observed_at),)
+        )
+        return _SnapshotOutcome(events=events)
+
+    source_path = snapshot.content_path
     metadata["organizer_input_created_at"] = observed_at.isoformat()
     state.upsert_job(
         job["job_id"],

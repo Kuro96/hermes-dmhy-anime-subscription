@@ -93,6 +93,30 @@ def test_completed_torrent_creates_organizer_input_once(tmp_path):
     assert second.events == ()
 
 
+def test_completed_torrent_without_content_path_does_not_organize_save_path(tmp_path):
+    snapshot = TorrentSnapshot(
+        torrent_hash="HASHDONE",
+        name="Example Anime 01",
+        state="uploading",
+        progress=1.0,
+        save_path="/downloads/anime",
+        content_path=None,
+    )
+
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        _insert_job(state, "job-done", "HASHDONE")
+        result = monitor_downloads(state, (snapshot,), _retry(), now=NOW)
+        job = state.get_job("job-done")
+
+    assert job is not None
+    assert job["status"] == "completed"
+    assert job["organizer_outcome"] is None
+    assert job["metadata"]["save_path"] == "/downloads/anime"
+    assert job["metadata"]["content_path"] is None
+    assert result.organizer_inputs == ()
+    assert [event.event_type for event in result.events] == ["download_completed"]
+
+
 def test_repeated_errored_state_exhausts_retries_and_records_failure_event(tmp_path):
     snapshot = TorrentSnapshot(torrent_hash="HASHERR", name="Broken", state="error", error="qBittorrent reported an error")
 

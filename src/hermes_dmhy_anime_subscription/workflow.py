@@ -351,7 +351,7 @@ def snapshots_from_qbittorrent_torrents(
                 state=torrent.state,
                 progress=torrent.progress,
                 save_path=torrent.save_path,
-                content_path=torrent.content_path or torrent.save_path,
+                content_path=torrent.content_path,
                 completed_at=completed_at,
                 metadata={"qbittorrent_hash": torrent.torrent_hash},
             )

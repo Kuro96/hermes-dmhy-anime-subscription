@@ -274,6 +274,36 @@ def test_snapshots_ignore_unknown_qbittorrent_completion_timestamp(tmp_path):
     assert snapshots[0].completed_at is None
 
 
+def test_snapshots_preserve_missing_qbittorrent_content_path(tmp_path):
+    config_path = _config(tmp_path)
+    config = load_config(config_path)
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "dmhy-abcdef1234567890abcdef1234567890abcdef12",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+        )
+
+    snapshots = snapshots_from_qbittorrent_torrents(
+        config,
+        (
+            QbittorrentTorrent(
+                torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+                name="Example.mkv",
+                state="uploading",
+                progress=1.0,
+                save_path=str(tmp_path / "downloads"),
+                content_path=None,
+            ),
+        ),
+    )
+
+    assert len(snapshots) == 1
+    assert snapshots[0].save_path == str(tmp_path / "downloads")
+    assert snapshots[0].content_path is None
+
+
 def test_production_tick_apply_does_not_mark_new_submissions_missing_in_same_tick(tmp_path, monkeypatch):
     config_path = _config(tmp_path, organizer_mode="move")
     monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
@@ -371,6 +401,60 @@ def test_production_tick_monitors_preexisting_active_jobs(tmp_path, monkeypatch)
     assert result.monitor_result is not None
     assert len(result.monitor_result.organizer_inputs) == 1
     assert result.summary()["monitor"]["organizer_inputs"] == 1
+
+
+def test_production_tick_does_not_organize_qbittorrent_save_root_without_content_path(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    download_root = tmp_path / "downloads"
+    download_root.mkdir()
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "dmhy-abcdef1234567890abcdef1234567890abcdef12",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+            metadata={"title": "Example Anime", "qbittorrent_category": "anime"},
+        )
+    qbit = FakeProductionQbittorrentClient(
+        (
+            QbittorrentTorrent(
+                torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+                name="Example.mkv",
+                state="uploading",
+                progress=1.0,
+                save_path=str(download_root),
+                content_path=None,
+                completion_on=1,
+            ),
+        )
+    )
+    organizer_calls = []
+
+    result = production_tick(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: "<rss><channel></channel></rss>",
+            qbittorrent_factory=lambda _config: qbit,
+            organizer_runner=lambda item, config: organizer_calls.append(item)
+            or OrganizerResult(item.job_id, config.organizer.mode, ()),
+        ),
+    )
+
+    assert len(result.snapshots) == 1
+    assert result.snapshots[0].content_path is None
+    assert result.monitor_result is not None
+    assert result.monitor_result.organizer_inputs == ()
+    assert organizer_calls == []
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("dmhy-abcdef1234567890abcdef1234567890abcdef12")
+    assert job is not None
+    assert job["status"] == DownloadJobStatus.COMPLETED.value
+    assert job["organizer_outcome"] is None
+    assert job["metadata"]["save_path"] == str(download_root)
+    assert job["metadata"]["content_path"] is None
 
 
 def test_organize_once_dry_run_forces_planning_even_when_config_mode_moves(tmp_path):
