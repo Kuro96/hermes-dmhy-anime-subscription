@@ -70,7 +70,16 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscriptio
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli schedule-tick --config config.json --feed-file fixtures/dmhy/rss-anime.xml
 ```
 
-`schedule-tick` is bounded and exits after one dry-run tick. Use your own scheduler to call it at the configured interval. The plugin does not install a service or cron job.
+`schedule-tick` is bounded and exits after one tick. By default it remains a safe dry-run and only plans RSS matching/submission. For a real production scheduler, call it with `--apply` after validating the config and environment:
+
+```bash
+# Example cron/no-agent command; keep secrets in environment variables, not config.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli schedule-tick --config /path/to/config.json --apply
+```
+
+`--apply` performs the complete production tick: submit new matched RSS items to qBittorrent, list qBittorrent torrents for the configured category, match active jobs to torrent state (including base32 RSS infohash to qBittorrent hex hash conversion), monitor completed downloads, and run the organizer according to config. It prints a JSON summary suitable for scheduler logs. Apply mode is still guarded by `ensure_apply_safe`: qBittorrent credential env var names and values must exist, webhook URL env values must exist when enabled, and `organizer.mode` must be `apply` or `move`.
+
+The plugin does not install a service or cron job; use your own scheduler to call the bounded command at the configured interval.
 
 ## Config Reference
 

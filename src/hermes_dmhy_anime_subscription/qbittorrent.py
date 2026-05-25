@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from http.cookiejar import CookieJar
 import os
 import socket
@@ -46,6 +47,20 @@ class QbittorrentTransport(Protocol):
     def send(self, request: QbittorrentHttpRequest) -> QbittorrentHttpResponse:
         """Send an HTTP request to qBittorrent."""
 
+
+
+@dataclass(frozen=True, slots=True)
+class QbittorrentTorrent:
+    """Read-only torrent state returned by qBittorrent /torrents/info."""
+
+    torrent_hash: str
+    name: str
+    state: str
+    progress: float
+    save_path: str | None = None
+    content_path: str | None = None
+    completion_on: int | None = None
+    raw: dict[str, object] = field(default_factory=dict)
 
 @dataclass(frozen=True, slots=True)
 class QbittorrentSubmissionPlan:
@@ -202,6 +217,30 @@ class QbittorrentClient:
             http_status=response.status,
         )
 
+
+    def list_torrents(self, *, category: str | None = None) -> tuple[QbittorrentTorrent, ...]:
+        """Return qBittorrent torrent states for monitoring without mutating torrents."""
+
+        if self._auth_enabled:
+            auth_error = self.login()
+            if auth_error is not None:
+                raise RuntimeError(auth_error.message)
+        selected_category = self.config.category if category is None else category
+        values = {"category": selected_category} if selected_category else {}
+        try:
+            response = self._get("/api/v2/torrents/info", values)
+        except _RetryableTransportError as exc:
+            raise RuntimeError(str(exc)) from exc
+        if response.status != 200:
+            raise RuntimeError(_response_message(response, "qBittorrent torrent listing failed"))
+        try:
+            raw_items = json.loads(response.body or "[]")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("qBittorrent torrent listing returned invalid JSON") from exc
+        if not isinstance(raw_items, list):
+            raise RuntimeError("qBittorrent torrent listing returned a non-list payload")
+        return tuple(_torrent_from_payload(item) for item in raw_items if isinstance(item, dict))
+
     def login(self) -> QbittorrentError | None:
         if not self._auth_enabled:
             return None
@@ -227,6 +266,24 @@ class QbittorrentClient:
     @property
     def _auth_enabled(self) -> bool:
         return self.username is not None or self.password is not None
+
+
+    def _get(self, path: str, values: dict[str, str]) -> QbittorrentHttpResponse:
+        query = urlencode(values)
+        url = urljoin(_base_url(self.config.endpoint), path.lstrip("/"))
+        if query:
+            url = f"{url}?{query}"
+        request = QbittorrentHttpRequest(
+            url=url,
+            data=b"",
+            headers={"Referer": _base_url(self.config.endpoint).rstrip("/")},
+            timeout=self.timeout,
+            method="GET",
+        )
+        try:
+            return self.transport.send(request)
+        except (TimeoutError, socket.timeout, URLError, OSError) as exc:
+            raise _RetryableTransportError(f"qBittorrent request failed: {exc.__class__.__name__}") from exc
 
     def _post_form(self, path: str, values: dict[str, str]) -> QbittorrentHttpResponse:
         body = urlencode(values).encode("utf-8")
@@ -288,6 +345,19 @@ def _response_message(response: QbittorrentHttpResponse, default: str) -> str:
         return f"{default}: {body}"
     return default
 
+
+
+def _torrent_from_payload(payload: dict[str, object]) -> QbittorrentTorrent:
+    return QbittorrentTorrent(
+        torrent_hash=str(payload.get("hash") or "").lower(),
+        name=str(payload.get("name") or ""),
+        state=str(payload.get("state") or "unknown"),
+        progress=float(payload.get("progress") or 0.0),
+        save_path=str(payload["save_path"]) if payload.get("save_path") is not None else None,
+        content_path=str(payload["content_path"]) if payload.get("content_path") is not None else None,
+        completion_on=int(payload["completion_on"]) if payload.get("completion_on") else None,
+        raw=dict(payload),
+    )
 
 def _failure(
     plan: QbittorrentSubmissionPlan,
