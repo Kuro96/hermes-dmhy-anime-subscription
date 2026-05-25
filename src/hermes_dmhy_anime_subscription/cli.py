@@ -15,6 +15,7 @@ from .workflow import (
     monitor_once,
     organize_once,
     plan_completed_dry_run,
+    production_tick,
     retry_failed_item,
     run_once,
     scheduler_tick,
@@ -80,6 +81,9 @@ def build_parser() -> argparse.ArgumentParser:
     schedule = subcommands.add_parser("schedule-tick")
     schedule.add_argument("--config", required=True)
     schedule.add_argument("--feed-file")
+    schedule_mode = schedule.add_mutually_exclusive_group()
+    schedule_mode.add_argument("--dry-run", action="store_true", default=True)
+    schedule_mode.add_argument("--apply", action="store_true")
     schedule.set_defaults(func=_schedule_tick)
     return parser
 
@@ -188,9 +192,14 @@ def _retry_failed(args: argparse.Namespace) -> int:
 
 
 def _schedule_tick(args: argparse.Namespace) -> int:
-    result = scheduler_tick(args.config, dependencies=_feed_file_dependencies(args.feed_file))
-    print(f"schedule tick: parsed={result.parsed_items} candidates={len(result.candidates)}")
-    return 0
+    dry_run = not args.apply
+    if dry_run:
+        result = scheduler_tick(args.config, dependencies=_feed_file_dependencies(args.feed_file))
+        print(f"schedule tick: parsed={result.parsed_items} candidates={len(result.candidates)}")
+        return 0
+    result = production_tick(args.config, dry_run=False, dependencies=_feed_file_dependencies(args.feed_file))
+    print(json.dumps(result.summary(), ensure_ascii=False, sort_keys=True, default=str))
+    return 0 if result.ok else 1
 
 
 def _feed_file_dependencies(path: str | None) -> WorkflowDependencies | None:

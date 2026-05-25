@@ -109,12 +109,80 @@ def test_planner_uses_torrent_url_when_magnet_is_absent():
     assert plan.payload()["urls"] == "https://dmhy.example/file.torrent"
 
 
+
+def test_list_torrents_logs_in_and_filters_configured_category():
+    transport = MockTransport(
+        [
+            QbittorrentHttpResponse(status=200, body="Ok."),
+            QbittorrentHttpResponse(
+                status=200,
+                body='[{"hash":"ABCDEF","name":"Example.mkv","state":"uploading","progress":1,"save_path":"/downloads/anime","content_path":"/downloads/anime/Example.mkv","completion_on":123}]',
+            ),
+        ]
+    )
+
+    torrents = QbittorrentClient(_config_with_auth(), username="user", password="fixture-pass", transport=transport).list_torrents()
+
+    assert [request.url for request in transport.requests] == [
+        "http://127.0.0.1:8080/api/v2/auth/login",
+        "http://127.0.0.1:8080/api/v2/torrents/info?category=anime",
+    ]
+    assert transport.requests[1].method == "GET"
+    assert torrents[0].torrent_hash == "abcdef"
+    assert torrents[0].name == "Example.mkv"
+    assert torrents[0].progress == 1.0
+    assert torrents[0].content_path == "/downloads/anime/Example.mkv"
+
+
+def test_list_torrents_all_categories_omits_category_filter():
+    transport = MockTransport(
+        [
+            QbittorrentHttpResponse(status=200, body="Ok."),
+            QbittorrentHttpResponse(status=200, body="[]"),
+        ]
+    )
+
+    QbittorrentClient(_config_with_auth(), username="user", password="fixture-pass", transport=transport).list_torrents(all_categories=True)
+
+    assert [request.url for request in transport.requests] == [
+        "http://127.0.0.1:8080/api/v2/auth/login",
+        "http://127.0.0.1:8080/api/v2/torrents/info",
+    ]
+
+
+def test_list_torrents_preserves_empty_category_filter_for_uncategorized():
+    transport = MockTransport(
+        [
+            QbittorrentHttpResponse(status=200, body="Ok."),
+            QbittorrentHttpResponse(status=200, body="[]"),
+        ]
+    )
+
+    QbittorrentClient(_config_with_auth(), username="user", password="fixture-pass", transport=transport).list_torrents(category="")
+
+    assert [request.url for request in transport.requests] == [
+        "http://127.0.0.1:8080/api/v2/auth/login",
+        "http://127.0.0.1:8080/api/v2/torrents/info?category=",
+    ]
+
+
 def _config() -> QbittorrentConfig:
     return QbittorrentConfig(
         endpoint="http://127.0.0.1:8080",
         category="anime",
         tags=("dmhy", "subscription"),
         save_path="/downloads/anime",
+    )
+
+
+def _config_with_auth() -> QbittorrentConfig:
+    return QbittorrentConfig(
+        endpoint="http://127.0.0.1:8080",
+        category="anime",
+        tags=("dmhy", "subscription"),
+        save_path="/downloads/anime",
+        username_env="QBITTORRENT_USERNAME",
+        password_env="QBITTORRENT_PASSWORD",
     )
 
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
+import base64
 from datetime import datetime, timezone
 import json
 import os
@@ -15,7 +16,7 @@ from .dmhy import parse_rss
 from .models import DownloadJobStatus, FailureRecord, NotificationEvent, OrganizerMode, ReleaseCandidate, SubscriptionRule
 from .monitor import OrganizerInput, TorrentSnapshot, monitor_downloads
 from .organizer import OrganizerResult, organize_media
-from .qbittorrent import QbittorrentClient, QbittorrentSubmitResult
+from .qbittorrent import QbittorrentClient, QbittorrentSubmitResult, QbittorrentTorrent
 from .rules import DedupeDecision, dedupe_items, match_rules
 from .state import SubscriptionState
 from .webhook import WebhookDeliveryPlan, WebhookDispatchResult, WebhookNotifier, build_webhook_payload
@@ -64,6 +65,67 @@ class MonitorOnceResult:
     failures: tuple[FailureRecord, ...]
     organizer_results: tuple[OrganizerResult, ...] = ()
     webhook_results: tuple[WebhookDispatchResult, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionTickResult:
+    dry_run: bool
+    run_result: RunOnceResult
+    torrent_count: int = 0
+    snapshots: tuple[TorrentSnapshot, ...] = ()
+    monitor_result: MonitorOnceResult | None = None
+    qbit_failure: dict[str, object] | None = None
+
+    @property
+    def ok(self) -> bool:
+        submit_failures = any(
+            outcome.submit_result is not None and not outcome.submit_result.success for outcome in self.run_result.candidates
+        )
+        monitor_failures = bool(self.monitor_result and self.monitor_result.failures)
+        webhook_failures = any(result.failure is not None for outcome in self.run_result.candidates for result in outcome.webhook_results)
+        if self.monitor_result is not None:
+            webhook_failures = webhook_failures or any(result.failure is not None for result in self.monitor_result.webhook_results)
+        return not (submit_failures or monitor_failures or webhook_failures or self.qbit_failure is not None)
+
+    def summary(self) -> dict[str, object]:
+        return {
+            "ok": self.ok,
+            "dry_run": self.dry_run,
+            "run_once": {
+                "parsed_items": self.run_result.parsed_items,
+                "parse_errors": self.run_result.parse_errors,
+                "candidates": len(self.run_result.candidates),
+                "submitted_or_seen": [outcome.job_id for outcome in self.run_result.candidates],
+            },
+            "qbit": {
+                "torrent_count": self.torrent_count,
+                "snapshots_for_active_jobs": len(self.snapshots),
+                "failure": self.qbit_failure,
+            },
+            "monitor": None
+            if self.monitor_result is None
+            else {
+                "organizer_inputs": len(self.monitor_result.organizer_inputs),
+                "events": len(self.monitor_result.events),
+                "failures": [asdict(failure) for failure in self.monitor_result.failures],
+                "organizer_actions": [
+                    {
+                        "job_id": result.job_id,
+                        "actions": [
+                            {
+                                "status": action.status,
+                                "media_type": action.media_type,
+                                "source": str(action.source_path),
+                                "destination": str(action.destination_path) if action.destination_path else None,
+                                "reason": action.reason,
+                            }
+                            for action in result.actions
+                        ],
+                    }
+                    for result in self.monitor_result.organizer_results
+                ],
+            },
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +202,7 @@ def run_once(
                         "rule_name": candidate.rule_name,
                         "dry_run": dry_run,
                         "submit_status": submit_result.status,
+                        "qbittorrent_category": submit_result.plan.category,
                     },
                 )
                 if submit_result.success:
@@ -176,13 +239,14 @@ def monitor_once(
     dry_run: bool = True,
     organize: bool = True,
     dependencies: WorkflowDependencies | None = None,
+    expected_job_ids: Iterable[str] | None = None,
 ) -> MonitorOnceResult:
     config = load_config(config_path)
     deps = dependencies or WorkflowDependencies()
     notifier = deps.webhook_factory(config) if deps.webhook_factory else WebhookNotifier(config.webhook)
     organizer_runner = deps.organizer_runner or (lambda organizer_input, loaded_config: organize_media(organizer_input, loaded_config.organizer))
     with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
-        expected = tuple(str(job["job_id"]) for job in state.list_jobs(statuses=_ACTIVE_STATUSES))
+        expected = tuple(expected_job_ids) if expected_job_ids is not None else tuple(str(job["job_id"]) for job in state.list_jobs(statuses=_ACTIVE_STATUSES))
         result = monitor_downloads(state, snapshots, config.retry, expected_job_ids=expected)
         organizer_results: list[OrganizerResult] = []
         if organize:
@@ -196,6 +260,112 @@ def monitor_once(
                 state.record_failure(webhook_result.failure.subject_id, webhook_result.failure.stage, webhook_result.failure.message, webhook_result.failure.attempts, webhook_result.failure.recoverable)
     return MonitorOnceResult(result.organizer_inputs, result.events, result.failures, tuple(organizer_results), webhook_results)
 
+
+
+def production_tick(
+    config_path: str | os.PathLike[str],
+    *,
+    dry_run: bool = True,
+    dependencies: WorkflowDependencies | None = None,
+) -> ProductionTickResult:
+    """Run one bounded scheduler tick, optionally applying qBittorrent monitor/organizer side effects."""
+
+    config = load_config(config_path)
+    ensure_apply_safe(config, dry_run=dry_run)
+    deps = dependencies or WorkflowDependencies()
+    pre_active_job_ids = _active_job_ids(config)
+    run_result = run_once(config_path, dry_run=dry_run, dependencies=deps)
+    if dry_run:
+        return ProductionTickResult(dry_run=True, run_result=run_result)
+
+    qbittorrent = deps.qbittorrent_factory(config) if deps.qbittorrent_factory else QbittorrentClient.from_config_env(config.qbittorrent)
+    try:
+        torrents = _list_monitor_torrents(qbittorrent, config)
+    except RuntimeError as exc:
+        return ProductionTickResult(
+            dry_run=False,
+            run_result=run_result,
+            qbit_failure={"stage": "list_torrents", "message": str(exc), "retryable": True},
+        )
+    snapshots = snapshots_from_qbittorrent_torrents(config, torrents, job_ids=pre_active_job_ids)
+    monitor_result = monitor_once(config_path, snapshots=snapshots, dry_run=False, organize=True, dependencies=deps, expected_job_ids=pre_active_job_ids)
+    return ProductionTickResult(
+        dry_run=False,
+        run_result=run_result,
+        torrent_count=len(torrents),
+        snapshots=snapshots,
+        monitor_result=monitor_result,
+    )
+
+
+
+def _active_job_ids(config: PluginConfig) -> tuple[str, ...]:
+    with SubscriptionState(config.state.path) as state:
+        return tuple(str(job["job_id"]) for job in state.list_jobs(statuses=_ACTIVE_STATUSES))
+
+
+def _list_monitor_torrents(qbittorrent: QbittorrentClient, config: PluginConfig) -> tuple[QbittorrentTorrent, ...]:
+    by_hash: dict[str, QbittorrentTorrent] = {}
+    for torrent in qbittorrent.list_torrents(all_categories=True):
+        if torrent.torrent_hash:
+            by_hash[torrent.torrent_hash.lower()] = torrent
+    return tuple(by_hash.values())
+
+
+def _monitor_categories(config: PluginConfig, jobs: tuple[dict[str, object], ...]) -> tuple[str, ...]:
+    rule_categories = {rule.name: (rule.category or config.qbittorrent.category or "") for rule in config.subscriptions.rules}
+    categories: set[str] = set()
+    for job in jobs:
+        metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+        category = metadata.get("qbittorrent_category") if isinstance(metadata, dict) else None
+        if not category and isinstance(metadata, dict):
+            rule_name = metadata.get("rule_name")
+            if isinstance(rule_name, str):
+                category = rule_categories.get(rule_name)
+        if category is not None:
+            categories.add(str(category))
+    if not categories:
+        categories.add(config.qbittorrent.category or "")
+    return tuple(sorted(categories))
+
+def snapshots_from_qbittorrent_torrents(
+    config: PluginConfig,
+    torrents: Iterable[QbittorrentTorrent],
+    *,
+    job_ids: Iterable[str] | None = None,
+) -> tuple[TorrentSnapshot, ...]:
+    """Match active jobs to qBittorrent torrents and produce monitor snapshots."""
+
+    by_hash = {torrent.torrent_hash.lower(): torrent for torrent in torrents if torrent.torrent_hash}
+    snapshots: list[TorrentSnapshot] = []
+    selected_job_ids = set(job_ids) if job_ids is not None else None
+    with SubscriptionState(config.state.path) as state:
+        jobs = state.list_jobs(statuses=_ACTIVE_STATUSES)
+    for job in jobs:
+        if selected_job_ids is not None and str(job["job_id"]) not in selected_job_ids:
+            continue
+        stored_hash = str(job.get("torrent_hash") or "").lower()
+        if not stored_hash:
+            continue
+        torrent = by_hash.get(_infohash_to_qbittorrent_hash(stored_hash)) or by_hash.get(stored_hash)
+        if torrent is None:
+            continue
+        completed_at = None
+        if torrent.completion_on and torrent.completion_on > 0:
+            completed_at = datetime.fromtimestamp(int(torrent.completion_on), tz=timezone.utc)
+        snapshots.append(
+            TorrentSnapshot(
+                torrent_hash=stored_hash,
+                name=_snapshot_title(torrent),
+                state=torrent.state,
+                progress=torrent.progress,
+                save_path=torrent.save_path,
+                content_path=torrent.content_path,
+                completed_at=completed_at,
+                metadata={"qbittorrent_hash": torrent.torrent_hash},
+            )
+        )
+    return tuple(snapshots)
 
 def organize_once(
     config_path: str | os.PathLike[str],
@@ -336,6 +506,28 @@ def job_id_for_candidate(candidate: ReleaseCandidate) -> str:
     return f"dmhy-{safe[:48]}"
 
 
+
+def _infohash_to_qbittorrent_hash(value: str) -> str:
+    normalized = value.strip().lower()
+    if len(normalized) == 40 and all(char in "0123456789abcdef" for char in normalized):
+        return normalized
+    try:
+        padded = normalized + ("=" * ((8 - len(normalized) % 8) % 8))
+        decoded = base64.b32decode(padded.upper())
+    except Exception:
+        return normalized
+    if len(decoded) == 20:
+        return decoded.hex()
+    return normalized
+
+
+def _snapshot_title(torrent: QbittorrentTorrent) -> str:
+    source = torrent.content_path or torrent.name
+    leaf = source.replace("\\", "/").rsplit("/", 1)[-1] if source else ""
+    suffix = Path(leaf).suffix.casefold()
+    title = leaf[: -len(suffix)] if suffix in _MEDIA_SUFFIXES else leaf
+    return title or torrent.name
+
 def _first_candidate(item, rules: tuple[SubscriptionRule, ...]) -> tuple[ReleaseCandidate | None, SubscriptionRule | None]:
     for result in match_rules(item, rules):
         if result.accepted and result.candidate is not None:
@@ -414,3 +606,6 @@ _ACTIVE_STATUSES = (
     DownloadJobStatus.MISSING.value,
     DownloadJobStatus.DELETED.value,
 )
+
+
+_MEDIA_SUFFIXES = frozenset({".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v", ".ts"})
