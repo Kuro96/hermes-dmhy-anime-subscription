@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 from urllib.request import urlopen
 
+from .bangumi import lookup_chinese_title
 from .config import ConfigError, OrganizerConfig, PluginConfig, load_config
 from .dmhy import parse_rss
 from .models import DownloadJobStatus, FailureRecord, NotificationEvent, OrganizerMode, ReleaseCandidate, SubscriptionRule
@@ -25,6 +26,7 @@ FeedFetcher = Callable[[str], str]
 QbittorrentClientFactory = Callable[[PluginConfig], QbittorrentClient]
 WebhookNotifierFactory = Callable[[PluginConfig], WebhookNotifier]
 OrganizerRunner = Callable[[OrganizerInput, PluginConfig], OrganizerResult]
+BangumiLookup = Callable[[str], str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +35,7 @@ class WorkflowDependencies:
     qbittorrent_factory: QbittorrentClientFactory | None = None
     webhook_factory: WebhookNotifierFactory | None = None
     organizer_runner: OrganizerRunner | None = None
+    bangumi_lookup: BangumiLookup | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,7 +247,8 @@ def monitor_once(
     config = load_config(config_path)
     deps = dependencies or WorkflowDependencies()
     notifier = deps.webhook_factory(config) if deps.webhook_factory else WebhookNotifier(config.webhook)
-    organizer_runner = deps.organizer_runner or (lambda organizer_input, loaded_config: organize_media(organizer_input, loaded_config.organizer))
+    bangumi_lookup = _bangumi_lookup(deps, dry_run=dry_run)
+    organizer_runner = deps.organizer_runner or (lambda organizer_input, loaded_config: organize_media(organizer_input, loaded_config.organizer, bangumi_lookup=bangumi_lookup))
     with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
         expected = tuple(expected_job_ids) if expected_job_ids is not None else tuple(str(job["job_id"]) for job in state.list_jobs(statuses=_ACTIVE_STATUSES))
         result = monitor_downloads(state, snapshots, config.retry, expected_job_ids=expected)
@@ -378,7 +382,8 @@ def organize_once(
     ensure_apply_safe(config, dry_run=dry_run or config.organizer.mode is OrganizerMode.DRY_RUN)
     deps = dependencies or WorkflowDependencies()
     notifier = deps.webhook_factory(config) if deps.webhook_factory else WebhookNotifier(config.webhook)
-    organizer_runner = deps.organizer_runner or (lambda item, loaded_config: organize_media(item, loaded_config.organizer))
+    bangumi_lookup = _bangumi_lookup(deps, dry_run=dry_run)
+    organizer_runner = deps.organizer_runner or (lambda item, loaded_config: organize_media(item, loaded_config.organizer, bangumi_lookup=bangumi_lookup))
     effective_config = _dry_run_organizer_config(config) if dry_run else config
     result = organizer_runner(organizer_input, effective_config)
     with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
@@ -397,7 +402,8 @@ def plan_completed_dry_run(
     config = load_config(config_path)
     deps = dependencies or WorkflowDependencies()
     notifier = deps.webhook_factory(config) if deps.webhook_factory else WebhookNotifier(config.webhook)
-    organizer_runner = deps.organizer_runner or (lambda organizer_input, loaded_config: organize_media(organizer_input, loaded_config.organizer))
+    bangumi_lookup = _bangumi_lookup(deps, dry_run=True)
+    organizer_runner = deps.organizer_runner or (lambda organizer_input, loaded_config: organize_media(organizer_input, loaded_config.organizer, bangumi_lookup=bangumi_lookup))
     snapshots = _completed_snapshots_from_run_result(run_result, source_path)
     with SubscriptionState(":memory:") as state:
         for outcome in run_result.candidates:
@@ -548,6 +554,14 @@ def _dry_run_organizer_config(config: PluginConfig) -> PluginConfig:
         return config
     organizer = OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=config.organizer.library_root, staging_root=config.organizer.staging_root)
     return replace(config, organizer=organizer)
+
+
+def _bangumi_lookup(deps: WorkflowDependencies, *, dry_run: bool) -> BangumiLookup | None:
+    if deps.bangumi_lookup is not None:
+        return deps.bangumi_lookup
+    if dry_run:
+        return None
+    return lookup_chinese_title
 
 
 def _state_path(config: PluginConfig, *, dry_run: bool) -> str | Path:
