@@ -159,6 +159,7 @@ def _parse_subscriptions(raw: dict[str, Any]) -> SubscriptionsConfig:
                 feed_names=_string_tuple(rule_raw.get("feed_names", ()), f"subscriptions.rules[{index}].feed_names"),
                 save_path=_optional_string(rule_raw.get("save_path"), f"subscriptions.rules[{index}].save_path"),
                 category=_optional_string(rule_raw.get("category"), f"subscriptions.rules[{index}].category"),
+                bangumi_subject_id=_optional_int_value(rule_raw.get("bangumi_subject_id"), f"subscriptions.rules[{index}].bangumi_subject_id"),
                 priority=_int_value(rule_raw.get("priority", 0), f"subscriptions.rules[{index}].priority"),
                 enabled=_bool_value(rule_raw.get("enabled", True), f"subscriptions.rules[{index}].enabled"),
             )
@@ -271,6 +272,12 @@ def _string_tuple(value: Any, label: str) -> tuple[str, ...]:
             raise ConfigError(f"{label}[{index}] must be a non-empty string")
         result.append(str(item))
     return tuple(result)
+
+
+def _optional_int_value(value: Any, label: str) -> int | None:
+    if value is None:
+        return None
+    return _int_value(value, label)
 
 
 def _int_value(value: Any, label: str) -> int:
