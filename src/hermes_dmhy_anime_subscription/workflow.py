@@ -9,10 +9,11 @@ import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 from typing import Callable, Iterable
 from urllib.request import urlopen
 
-from .bangumi import lookup_chinese_title
+from .bangumi import BangumiSubjectEpisodes, fetch_subject_main_episodes, lookup_chinese_title
 from .config import ConfigError, OrganizerConfig, PluginConfig, load_config
 from .dmhy import parse_rss
 from .models import DownloadJobStatus, FailureRecord, NotificationEvent, OrganizerMode, ReleaseCandidate, RuleEpisodeMode, SubscriptionRule
@@ -28,6 +29,7 @@ QbittorrentClientFactory = Callable[[PluginConfig], QbittorrentClient]
 WebhookNotifierFactory = Callable[[PluginConfig], WebhookNotifier]
 OrganizerRunner = Callable[[OrganizerInput, PluginConfig], OrganizerResult]
 BangumiLookup = Callable[[str], str | None]
+BangumiSubjectFetcher = Callable[[int], BangumiSubjectEpisodes]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,6 +39,7 @@ class WorkflowDependencies:
     webhook_factory: WebhookNotifierFactory | None = None
     organizer_runner: OrganizerRunner | None = None
     bangumi_lookup: BangumiLookup | None = None
+    bangumi_subject_fetcher: BangumiSubjectFetcher | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +147,7 @@ class StateSummary:
     pending: tuple[dict[str, object], ...]
     failed: tuple[dict[str, object], ...]
     retryable: tuple[dict[str, object], ...]
+    archived_rules: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +183,7 @@ def run_once(
         items.extend(parsed.items)
         parse_errors += len(parsed.errors)
 
+    archived_rule_names = _archived_rule_names(config)
     with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
         satisfied_seasons = set(state.list_satisfied_season_packs())
         matched: list[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule]] = []
@@ -187,7 +192,7 @@ def run_once(
                 continue
             if state.has_seen_item(decision.dedupe_key):
                 continue
-            candidate, rule = _first_candidate(decision.item, config.subscriptions.rules)
+            candidate, rule = _first_candidate(decision.item, config.subscriptions.rules, archived_rule_names=archived_rule_names)
             if candidate is None:
                 if not dry_run:
                     state.record_seen_item(decision.item)
@@ -213,6 +218,7 @@ def run_once(
                     metadata={
                         "title": candidate.title,
                         "rule_name": candidate.rule_name,
+                        "episode": _candidate_episode(candidate),
                         "dry_run": dry_run,
                         "submit_status": submit_result.status,
                         "qbittorrent_category": submit_result.plan.category,
@@ -272,11 +278,13 @@ def monitor_once(
                 organizer_result = organizer_runner(organizer_input, config)
                 organizer_results.append(organizer_result)
                 _record_organizer_actions(state, organizer_result, dry_run=dry_run)
-        webhook_results = tuple(_notify(notifier, event, dry_run=dry_run) for event in (*result.events, *[event for item in organizer_results for event in item.events]))
+        archive_events = _archive_completed_rules(state, config, deps) if not dry_run else ()
+        all_events = (*result.events, *archive_events)
+        webhook_results = tuple(_notify(notifier, event, dry_run=dry_run) for event in (*all_events, *[event for item in organizer_results for event in item.events]))
         for webhook_result in webhook_results:
             if not dry_run and webhook_result.failure is not None:
                 state.record_failure(webhook_result.failure.subject_id, webhook_result.failure.stage, webhook_result.failure.message, webhook_result.failure.attempts, webhook_result.failure.recoverable)
-    return MonitorOnceResult(result.organizer_inputs, result.events, result.failures, tuple(organizer_results), webhook_results)
+    return MonitorOnceResult(result.organizer_inputs, all_events, result.failures, tuple(organizer_results), webhook_results)
 
 
 
@@ -432,6 +440,7 @@ def plan_completed_dry_run(
                 metadata={
                     "title": outcome.candidate.title,
                     "rule_name": outcome.candidate.rule_name,
+                    "episode": _candidate_episode(outcome.candidate),
                     "dry_run": True,
                     "submit_status": outcome.submit_result.status,
                 },
@@ -452,6 +461,7 @@ def list_state(config_path: str | os.PathLike[str]) -> StateSummary:
     with SubscriptionState(config.state.path) as state:
         jobs = state.list_jobs()
         failures = state.list_failures()
+        archived_rules = state.list_archived_rules()
     processed_statuses = {DownloadJobStatus.SUBMITTED.value, DownloadJobStatus.QUEUED.value, DownloadJobStatus.DOWNLOADING.value, DownloadJobStatus.COMPLETED.value}
     pending_statuses = {DownloadJobStatus.PENDING.value, DownloadJobStatus.STALLED.value, DownloadJobStatus.ERROR.value, DownloadJobStatus.MISSING.value, DownloadJobStatus.DELETED.value}
     return StateSummary(
@@ -459,6 +469,7 @@ def list_state(config_path: str | os.PathLike[str]) -> StateSummary:
         pending=tuple(job for job in jobs if str(job["status"]) in pending_statuses),
         failed=tuple(job for job in jobs if str(job["status"]) == DownloadJobStatus.FAILED.value),
         retryable=tuple(failure for failure in failures if bool(failure["recoverable"])),
+        archived_rules=archived_rules,
     )
 
 
@@ -548,8 +559,14 @@ def _snapshot_title(torrent: QbittorrentTorrent) -> str:
     title = leaf[: -len(suffix)] if suffix in _MEDIA_SUFFIXES else leaf
     return title or torrent.name
 
-def _first_candidate(item, rules: tuple[SubscriptionRule, ...]) -> tuple[ReleaseCandidate | None, SubscriptionRule | None]:
-    for result in match_rules(item, rules):
+def _first_candidate(
+    item,
+    rules: tuple[SubscriptionRule, ...],
+    *,
+    archived_rule_names: frozenset[str] = frozenset(),
+) -> tuple[ReleaseCandidate | None, SubscriptionRule | None]:
+    active_rules = tuple(rule for rule in rules if rule.name not in archived_rule_names)
+    for result in match_rules(item, active_rules):
         if result.accepted and result.candidate is not None:
             return result.candidate, result.rule
     return None, None
@@ -616,6 +633,7 @@ def _normalize_series_key(value: str) -> str:
     value = re.sub(r"\bS\d{1,2}\s*E\d{1,3}\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\bS\d{1,2}\b|\bSeason\s*\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)\s+Season\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"第\s*\d{1,2}\s*[季期]", " ", value)
+    value = re.sub(r"第\s*\d{1,3}\s*[話话]", " ", value)
     value = re.sub(r"(?:^|[\s_\-.])\d{1,3}(?:v\d+)?(?:[\s_\-.]|$)", " ", value)
     value = re.sub(r"\b(?:480|720|1080|2160)p\b|\b4k\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"季度全集|季度|全集|合集|season pack|batch|complete", " ", value, flags=re.IGNORECASE)
@@ -662,6 +680,20 @@ def _state_path(config: PluginConfig, *, dry_run: bool) -> str | Path:
     return ":memory:" if dry_run else config.state.path
 
 
+def _archived_rule_names(config: PluginConfig) -> frozenset[str]:
+    if not config.state.path.exists():
+        return frozenset()
+    uri = f"{config.state.path.resolve().as_uri()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'archived_rules'"
+        ).fetchone()
+        if table is None:
+            return frozenset()
+        cursor = connection.execute("SELECT rule_name FROM archived_rules")
+        return frozenset(str(row[0]) for row in cursor.fetchall())
+
+
 def _completed_snapshots_from_run_result(run_result: RunOnceResult, source_path: str) -> tuple[TorrentSnapshot, ...]:
     snapshots: list[TorrentSnapshot] = []
     for outcome in run_result.candidates:
@@ -678,6 +710,103 @@ def _completed_snapshots_from_run_result(run_result: RunOnceResult, source_path:
             )
         )
     return tuple(snapshots)
+
+
+def _archive_completed_rules(
+    state: SubscriptionState,
+    config: PluginConfig,
+    deps: WorkflowDependencies,
+) -> tuple[NotificationEvent, ...]:
+    fetcher = deps.bangumi_subject_fetcher or fetch_subject_main_episodes
+    events: list[NotificationEvent] = []
+    for rule in config.subscriptions.rules:
+        if rule.bangumi_subject_id is None or state.is_rule_archived(rule.name):
+            continue
+        subject = fetcher(rule.bangumi_subject_id)
+        required = set(range(1, subject.eps + 1))
+        fetched = set(subject.main_episode_numbers)
+        if subject.eps <= 0 or not required.issubset(fetched):
+            continue
+        completed = _completed_rule_episodes(state, rule.name)
+        if not required.issubset(completed):
+            continue
+        metadata = {
+            "bangumi_subject_id": subject.subject_id,
+            "eps": subject.eps,
+            "main_episode_numbers": list(subject.main_episode_numbers),
+            "completed_episodes": sorted(completed),
+        }
+        state.archive_rule(rule.name, bangumi_subject_id=rule.bangumi_subject_id, reason="bangumi_complete", metadata=metadata)
+        events.append(
+            NotificationEvent(
+                event_type="subscription_archived",
+                title=rule.name,
+                message=f"Subscription rule {rule.name} archived after Bangumi subject completion",
+                severity="info",
+                metadata={"rule_name": rule.name, "status": "archived", **metadata},
+            )
+        )
+    return tuple(events)
+
+
+def _completed_rule_episodes(state: SubscriptionState, rule_name: str) -> set[int]:
+    completed: set[int] = set()
+    for job in state.list_jobs(statuses=(DownloadJobStatus.COMPLETED.value,)):
+        metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+        if metadata.get("rule_name") != rule_name:
+            continue
+        organizer_outcome = job.get("organizer_outcome")
+        if organizer_outcome != "applied":
+            continue
+        completed.update(_metadata_episodes(metadata))
+    return completed
+
+
+def _metadata_episodes(metadata: dict[str, object]) -> set[int]:
+    episodes = _metadata_episode_list(metadata)
+    episode = _integral_episode(metadata.get("episode"))
+    if episode is not None:
+        episodes.add(episode)
+    return episodes
+
+
+def _metadata_episode_list(metadata: dict[str, object]) -> set[int]:
+    episodes: set[int] = set()
+    value = metadata.get("episodes")
+    if isinstance(value, list):
+        for item in value:
+            episode = _integral_episode(item)
+            if episode is not None:
+                episodes.add(episode)
+    return episodes
+
+
+def _integral_episode(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        try:
+            parsed = float(value)
+        except ValueError:
+            return None
+        if parsed.is_integer():
+            return int(parsed)
+    return None
+
+
+def _candidate_episode(candidate: ReleaseCandidate) -> int | None:
+    explicit = _integral_episode(candidate.episode)
+    if explicit is not None:
+        return explicit
+    match = re.search(r"\bS\d{1,2}\s*E(?P<episode>\d{1,3})\b", candidate.title, flags=re.IGNORECASE)
+    if match:
+        return int(match.group("episode"))
+    bracketed = re.search(r"(?:^|[\s_\-.\[\(])(?P<episode>\d{1,3})(?:v\d+)?(?:[\s_\-.\]\)]|$)", candidate.title)
+    return int(bracketed.group("episode")) if bracketed else None
 
 
 def _notify(notifier: WebhookNotifier, event: NotificationEvent, *, dry_run: bool) -> WebhookDispatchResult:
@@ -702,6 +831,32 @@ def _record_organizer_actions(state: SubscriptionState, result: OrganizerResult,
         if action.destination_path is None:
             continue
         outcome = "dry-run" if dry_run else action.status
+        job = state.get_job(result.job_id)
+        if job is not None:
+            metadata = dict(job["metadata"])
+            applied = not dry_run and action.status == "applied"
+            if applied and action.episode is not None:
+                # During organizer action recording, the candidate-level legacy scalar
+                # metadata["episode"] is not proof that that episode was organized.
+                # Only episodes already recorded by applied actions may be carried
+                # forward here; _completed_rule_episodes still reads the scalar for
+                # older completed jobs that predate metadata["episodes"].
+                episodes = _metadata_episode_list(metadata)
+                episodes.add(action.episode)
+                metadata["episode"] = action.episode
+                metadata["episodes"] = sorted(episodes)
+            if applied and action.season is not None:
+                metadata["season"] = action.season
+            state.upsert_job(
+                result.job_id,
+                dedupe_key=str(job["dedupe_key"]),
+                status=str(job["status"]),
+                torrent_hash=job.get("torrent_hash"),
+                retry_count=int(job["retry_count"]),
+                last_error=job.get("last_error"),
+                organizer_outcome=outcome,
+                metadata=metadata,
+            )
         state.record_organizer_outcome(result.job_id, outcome, str(action.source_path), str(action.destination_path))
 
 

@@ -74,3 +74,26 @@ def test_failure_and_organizer_outcome_slots_are_available(tmp_path):
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         state.record_failure("job-1", "download", "temporary failure", attempts=2)
         state.record_organizer_outcome("job-1", "dry-run", "/tmp/source", "/tmp/dest")
+
+
+def test_archived_rules_are_durable_and_listable(tmp_path):
+    state_path = tmp_path / "state.sqlite3"
+
+    with SubscriptionState(state_path) as state:
+        assert state.is_rule_archived("example-show") is False
+        state.archive_rule(
+            "example-show",
+            bangumi_subject_id=12345,
+            reason="bangumi_complete",
+            metadata={"completed_episodes": [1, 2]},
+        )
+
+    with SubscriptionState(state_path) as state:
+        assert state.is_rule_archived("example-show") is True
+        archived = state.list_archived_rules()
+
+    assert len(archived) == 1
+    assert archived[0]["rule_name"] == "example-show"
+    assert archived[0]["bangumi_subject_id"] == 12345
+    assert archived[0]["reason"] == "bangumi_complete"
+    assert archived[0]["metadata"] == {"completed_episodes": [1, 2]}

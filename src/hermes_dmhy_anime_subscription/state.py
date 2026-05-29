@@ -204,6 +204,39 @@ class SubscriptionState(AbstractContextManager["SubscriptionState"]):
             )
 
 
+
+    def archive_rule(
+        self,
+        rule_name: str,
+        *,
+        bangumi_subject_id: int | None = None,
+        reason: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        now = _now()
+        payload = json.dumps(metadata or {}, sort_keys=True)
+        with self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO archived_rules (rule_name, bangumi_subject_id, reason, metadata_json, archived_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(rule_name) DO UPDATE SET
+                    bangumi_subject_id = excluded.bangumi_subject_id,
+                    reason = excluded.reason,
+                    metadata_json = excluded.metadata_json,
+                    archived_at = excluded.archived_at
+                """,
+                (rule_name, bangumi_subject_id, reason, payload, now),
+            )
+
+    def is_rule_archived(self, rule_name: str) -> bool:
+        cursor = self._connection.execute("SELECT 1 FROM archived_rules WHERE rule_name = ?", (rule_name,))
+        return cursor.fetchone() is not None
+
+    def list_archived_rules(self) -> tuple[dict[str, Any], ...]:
+        cursor = self._connection.execute("SELECT * FROM archived_rules ORDER BY archived_at DESC")
+        return tuple(_archived_rule_row(row) for row in cursor.fetchall())
+
     def list_jobs(self, statuses: tuple[str, ...] | list[str] | None = None) -> tuple[dict[str, Any], ...]:
         if statuses:
             placeholders = ",".join("?" for _ in statuses)
@@ -291,6 +324,14 @@ class SubscriptionState(AbstractContextManager["SubscriptionState"]):
                     destination_path TEXT,
                     recorded_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS archived_rules (
+                    rule_name TEXT PRIMARY KEY,
+                    bangumi_subject_id INTEGER,
+                    reason TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    archived_at TEXT NOT NULL
+                );
                 """
             )
 
@@ -300,8 +341,25 @@ def _job_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return None
     data = dict(row)
     metadata_json = data.pop("metadata_json")
-    data["metadata"] = json.loads(metadata_json if isinstance(metadata_json, str) else "{}")
+    data["metadata"] = _json_object(metadata_json)
     return data
+
+
+def _archived_rule_row(row: sqlite3.Row) -> dict[str, Any]:
+    data = dict(row)
+    metadata_json = data.pop("metadata_json")
+    data["metadata"] = _json_object(metadata_json)
+    return data
+
+
+def _json_object(value: object) -> dict[str, Any]:
+    if not isinstance(value, str):
+        return {}
+    try:
+        decoded = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return decoded if isinstance(decoded, dict) else {}
 
 
 def _now() -> str:

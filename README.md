@@ -128,6 +128,8 @@ Each rule is matched in order. The first accepted rule creates the candidate.
 
 `priority` is stored on the release candidate.
 
+`bangumi_subject_id` is optional. When set, apply-mode monitoring can archive the rule after Bangumi reports the subject's main episodes and the corresponding downloaded episodes are completed and organized.
+
 `enabled` defaults to `true`. Set it to `false` to keep a rule in the file without matching it.
 
 ### `qbittorrent`
@@ -152,7 +154,11 @@ Dry-run qBittorrent submission prints the planned payload, makes no HTTP calls, 
 
 ### `state`
 
-`path` is the SQLite file used for seen feed items, submitted jobs, retry records, failures, and organizer outcomes during apply and stateful monitor operations. Dry-run planning uses ephemeral in-memory state instead of this file.
+`path` is the SQLite file used for seen feed items, submitted jobs, retry records, failures, organizer outcomes, and archived subscription rules during apply and stateful monitor operations. Dry-run planning uses ephemeral in-memory state instead of this file.
+
+Dry-run `run-once` and `schedule-tick` do not initialize or migrate the configured SQLite file. If the file already has an `archived_rules` table, they read only that table to skip archived rules; a missing file or missing table is treated as no archived rules.
+
+Archived rules are created only by apply-mode monitoring after a rule with `bangumi_subject_id` has all Bangumi main episodes completed and organized. Once archived, the rule stays in state history and is skipped by future matching; the `state` command includes archived rules in its JSON output.
 
 ### `organizer`
 
