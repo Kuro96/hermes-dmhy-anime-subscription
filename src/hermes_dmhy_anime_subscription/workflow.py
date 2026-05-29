@@ -577,10 +577,22 @@ def _season_pack_satisfaction_key(candidate: ReleaseCandidate) -> tuple[str, str
 
 
 def _series_key(title: str) -> str:
-    value = re.sub(r"^\s*\[[^\]]+\]\s*", " ", title)
+    value = _strip_leading_release_group(title)
     value = re.sub(r"\[([^\]]*)\]", _series_key_bracket_replacement, value)
     value = re.sub(r"\([^\)]*\)", " ", value)
     return _normalize_series_key(value)
+
+
+def _strip_leading_release_group(title: str) -> str:
+    match = re.match(r"^\s*\[[^\]]+\]\s*", title)
+    if not match:
+        return title
+    remainder = title[match.end():]
+    remainder = re.sub(r"\[([^\]]*)\]", _series_key_bracket_replacement, remainder)
+    remainder = re.sub(r"\([^\)]*\)", " ", remainder)
+    if _normalize_series_key(remainder):
+        return title[match.end():]
+    return title
 
 
 def _series_key_bracket_replacement(match: re.Match[str]) -> str:

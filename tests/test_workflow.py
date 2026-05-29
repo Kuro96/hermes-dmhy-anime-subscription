@@ -230,6 +230,8 @@ def test_run_once_apply_satisfied_pack_suppresses_later_episode_but_accepts_late
 
 
 def test_series_key_falls_back_to_bracketed_series_after_release_group():
+    assert workflow._series_key("[Show A] [01][1080p]") == "show a"
+    assert workflow._series_key("[Show B] 季度全集 [1080p]") == "show b"
     assert workflow._series_key("[ExampleSub] [Show A] [01][1080p]") == "show a"
     assert workflow._series_key("[ExampleSub] [Show B] 季度全集 [1080p]") == "show b"
 
@@ -254,8 +256,8 @@ def test_run_once_allowed_pack_does_not_suppress_different_bracketed_series_epis
     assert result.parsed_items == 2
     assert len(result.candidates) == 2
     assert [submission[0].title for submission in fake_qbit.submissions] == [
-        "[ExampleSub] [Show A] [01][1080p]",
-        "[ExampleSub] [Show B] 季度全集 [1080p]",
+        "[Show A] [01][1080p]",
+        "[Show B] 季度全集 [1080p]",
     ]
 
 
@@ -949,7 +951,7 @@ def _different_bracketed_show_episode_and_pack_rss():
   <channel>
     <title>DMHY Anime RSS</title>
     <item>
-      <title>[ExampleSub] [Show A] [01][1080p]</title>
+      <title>[Show A] [01][1080p]</title>
       <link>https://share.dmhy.org/topics/view/200011_show_a_01.html</link>
       <pubDate>Sun, 24 May 2026 10:30:00 +0000</pubDate>
       <description>Show A episode release</description>
@@ -959,7 +961,7 @@ def _different_bracketed_show_episode_and_pack_rss():
       <enclosure url="magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amp;dn=ShowA" type="application/x-bittorrent" />
     </item>
     <item>
-      <title>[ExampleSub] [Show B] 季度全集 [1080p]</title>
+      <title>[Show B] 季度全集 [1080p]</title>
       <link>https://share.dmhy.org/topics/view/200012_show_b_batch.html?sort_id=31</link>
       <pubDate>Sun, 24 May 2026 11:00:00 +0000</pubDate>
       <description>Show B complete season pack</description>
