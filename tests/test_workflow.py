@@ -229,6 +229,36 @@ def test_run_once_apply_satisfied_pack_suppresses_later_episode_but_accepts_late
         }
 
 
+def test_series_key_falls_back_to_bracketed_series_after_release_group():
+    assert workflow._series_key("[ExampleSub] [Show A] [01][1080p]") == "show a"
+    assert workflow._series_key("[ExampleSub] [Show B] 季度全集 [1080p]") == "show b"
+
+
+def test_run_once_allowed_pack_does_not_suppress_different_bracketed_series_episode(tmp_path):
+    config_path = _config(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    raw["subscriptions"]["rules"][0]["include_keywords"] = ["1080p"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    fake_qbit = FakeQbittorrentClient()
+
+    result = run_once(
+        config_path,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _different_bracketed_show_episode_and_pack_rss(),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert result.parsed_items == 2
+    assert len(result.candidates) == 2
+    assert [submission[0].title for submission in fake_qbit.submissions] == [
+        "[ExampleSub] [Show A] [01][1080p]",
+        "[ExampleSub] [Show B] 季度全集 [1080p]",
+    ]
+
+
 def test_run_once_dry_run_allowed_pack_does_not_satisfy_later_episode(tmp_path, monkeypatch):
     config_path = _config(tmp_path, organizer_mode="move")
     raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -907,6 +937,36 @@ def _episode_and_pack_rss():
       <category>季度全集</category>
       <guid>season-pack-200002</guid>
       <enclosure url="magnet:?xt=urn:btih:2222222222222222222222222222222222222222&amp;dn=SeasonPack" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+"""
+
+
+def _different_bracketed_show_episode_and_pack_rss():
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Anime RSS</title>
+    <item>
+      <title>[ExampleSub] [Show A] [01][1080p]</title>
+      <link>https://share.dmhy.org/topics/view/200011_show_a_01.html</link>
+      <pubDate>Sun, 24 May 2026 10:30:00 +0000</pubDate>
+      <description>Show A episode release</description>
+      <author>ExampleSub</author>
+      <category>動畫</category>
+      <guid>episode-200011</guid>
+      <enclosure url="magnet:?xt=urn:btih:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa&amp;dn=ShowA" type="application/x-bittorrent" />
+    </item>
+    <item>
+      <title>[ExampleSub] [Show B] 季度全集 [1080p]</title>
+      <link>https://share.dmhy.org/topics/view/200012_show_b_batch.html?sort_id=31</link>
+      <pubDate>Sun, 24 May 2026 11:00:00 +0000</pubDate>
+      <description>Show B complete season pack</description>
+      <author>ExampleSub</author>
+      <category>季度全集</category>
+      <guid>season-pack-200012</guid>
+      <enclosure url="magnet:?xt=urn:btih:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb&amp;dn=ShowBPack" type="application/x-bittorrent" />
     </item>
   </channel>
 </rss>

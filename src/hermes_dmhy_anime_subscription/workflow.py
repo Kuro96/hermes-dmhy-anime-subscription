@@ -578,7 +578,29 @@ def _season_pack_satisfaction_key(candidate: ReleaseCandidate) -> tuple[str, str
 
 def _series_key(title: str) -> str:
     value = re.sub(r"^\s*\[[^\]]+\]\s*", " ", title)
-    value = re.sub(r"\[[^\]]*\]|\([^\)]*\)", " ", value)
+    value = re.sub(r"\[([^\]]*)\]", _series_key_bracket_replacement, value)
+    value = re.sub(r"\([^\)]*\)", " ", value)
+    return _normalize_series_key(value)
+
+
+def _series_key_bracket_replacement(match: re.Match[str]) -> str:
+    content = match.group(1).strip()
+    if not content or _is_series_key_metadata_bracket(content):
+        return " "
+    return f" {content} "
+
+
+def _is_series_key_metadata_bracket(content: str) -> bool:
+    normalized = content.strip().casefold()
+    return bool(
+        re.fullmatch(r"\d{1,3}(?:v\d+)?", normalized)
+        or re.fullmatch(r"(?:480|720|1080|2160)p", normalized)
+        or re.fullmatch(r"4k", normalized)
+        or re.fullmatch(r"[gb]b|hevc|x26[45]|avc|aac|flac|chs|cht|sc|tc|big5|gb", normalized)
+    )
+
+
+def _normalize_series_key(value: str) -> str:
     value = re.sub(r"\bS\d{1,2}\s*E\d{1,3}\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\bS\d{1,2}\b|\bSeason\s*\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)\s+Season\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"第\s*\d{1,2}\s*[季期]", " ", value)
