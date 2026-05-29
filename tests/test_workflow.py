@@ -173,6 +173,56 @@ def test_retryable_qbittorrent_submit_failure_remains_eligible_until_success(tmp
     assert job["status"] == DownloadJobStatus.SUBMITTED.value
 
 
+def test_run_once_apply_prefers_allowed_season_pack_without_recording_suppressed_episode(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["allow_packs"] = True
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    fake_qbit = FakeQbittorrentClient()
+
+    dependencies = WorkflowDependencies(
+        feed_fetcher=lambda _url: _episode_and_pack_rss(),
+        qbittorrent_factory=lambda _config: fake_qbit,
+    )
+    result = run_once(config_path, dry_run=False, dependencies=dependencies)
+    repeat = run_once(config_path, dry_run=False, dependencies=dependencies)
+
+    assert result.parsed_items == 2
+    assert len(result.candidates) == 1
+    assert len(repeat.candidates) == 0
+    assert result.candidates[0].candidate.feed_item.is_season_pack is True
+    assert len(fake_qbit.submissions) == 1
+    assert fake_qbit.submissions[0][0].title == "[ExampleSub] Example Anime 季度全集 [1080p]"
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.has_seen_item("infohash:2222222222222222222222222222222222222222")
+        assert not state.has_seen_item("infohash:1111111111111111111111111111111111111111")
+        assert [job["torrent_hash"] for job in state.list_jobs()] == ["2222222222222222222222222222222222222222"]
+
+
+def test_run_once_episode_only_rule_keeps_episode_when_pack_is_present(tmp_path):
+    config_path = _config(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    fake_qbit = FakeQbittorrentClient()
+
+    result = run_once(
+        config_path,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_and_pack_rss(),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert result.parsed_items == 2
+    assert len(result.candidates) == 1
+    assert result.candidates[0].candidate.feed_item.is_season_pack is False
+    assert fake_qbit.submissions[0][0].title == "[ExampleSub] Example Anime - 01 [1080p][CHS]"
+
+
 def test_cli_commands_cover_validate_run_monitor_state_failures_and_retry(tmp_path, capsys):
     config_path = _config(tmp_path)
     completed_source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
@@ -761,3 +811,33 @@ def _config(tmp_path, organizer_mode="dry-run"):
     path = tmp_path / f"config-{organizer_mode}.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
+
+
+def _episode_and_pack_rss():
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Anime RSS</title>
+    <item>
+      <title>[ExampleSub] Example Anime - 01 [1080p][CHS]</title>
+      <link>https://share.dmhy.org/topics/view/200001_example_anime_01.html</link>
+      <pubDate>Sun, 24 May 2026 10:30:00 +0000</pubDate>
+      <description>Example release description</description>
+      <author>ExampleSub</author>
+      <category>動畫</category>
+      <guid>episode-200001</guid>
+      <enclosure url="magnet:?xt=urn:btih:1111111111111111111111111111111111111111&amp;dn=Episode" type="application/x-bittorrent" />
+    </item>
+    <item>
+      <title>[ExampleSub] Example Anime 季度全集 [1080p]</title>
+      <link>https://share.dmhy.org/topics/view/200002_example_anime_batch.html?sort_id=31</link>
+      <pubDate>Sun, 24 May 2026 11:00:00 +0000</pubDate>
+      <description>Quarterly complete season pack</description>
+      <author>ExampleSub</author>
+      <category>季度全集</category>
+      <guid>season-pack-200002</guid>
+      <enclosure url="magnet:?xt=urn:btih:2222222222222222222222222222222222222222&amp;dn=SeasonPack" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+"""

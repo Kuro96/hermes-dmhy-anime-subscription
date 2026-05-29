@@ -82,6 +82,23 @@ class SubscriptionState(AbstractContextManager["SubscriptionState"]):
             )
         return cursor.rowcount == 1
 
+    def record_pack_preference(self, rule_name: str, series_key: str, season: int, *, job_id: str, dedupe_key: str) -> bool:
+        now = _now()
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                INSERT OR IGNORE INTO pack_preferences
+                    (rule_name, series_key, season, job_id, dedupe_key, recorded_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (rule_name, series_key, season, job_id, dedupe_key, now),
+            )
+        return cursor.rowcount == 1
+
+    def list_pack_preferences(self) -> tuple[tuple[str, str, int], ...]:
+        cursor = self._connection.execute("SELECT rule_name, series_key, season FROM pack_preferences")
+        return tuple((str(row["rule_name"]), str(row["series_key"]), int(row["season"])) for row in cursor.fetchall())
+
     def upsert_job(
         self,
         job_id: str,
@@ -229,6 +246,16 @@ class SubscriptionState(AbstractContextManager["SubscriptionState"]):
                     torrent_hash TEXT PRIMARY KEY,
                     job_id TEXT,
                     first_seen_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS pack_preferences (
+                    rule_name TEXT NOT NULL,
+                    series_key TEXT NOT NULL,
+                    season INTEGER NOT NULL,
+                    job_id TEXT NOT NULL,
+                    dedupe_key TEXT NOT NULL,
+                    recorded_at TEXT NOT NULL,
+                    PRIMARY KEY (rule_name, series_key, season)
                 );
 
                 CREATE TABLE IF NOT EXISTS jobs (

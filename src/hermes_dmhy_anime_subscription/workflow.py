@@ -8,13 +8,14 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import re
 from typing import Callable, Iterable
 from urllib.request import urlopen
 
 from .bangumi import lookup_chinese_title
 from .config import ConfigError, OrganizerConfig, PluginConfig, load_config
 from .dmhy import parse_rss
-from .models import DownloadJobStatus, FailureRecord, NotificationEvent, OrganizerMode, ReleaseCandidate, SubscriptionRule
+from .models import DownloadJobStatus, FailureRecord, NotificationEvent, OrganizerMode, ReleaseCandidate, RuleEpisodeMode, SubscriptionRule
 from .monitor import OrganizerInput, TorrentSnapshot, monitor_downloads
 from .organizer import OrganizerResult, organize_media
 from .qbittorrent import QbittorrentClient, QbittorrentSubmitResult, QbittorrentTorrent
@@ -179,6 +180,8 @@ def run_once(
         parse_errors += len(parsed.errors)
 
     with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
+        pack_preferences = set(state.list_pack_preferences())
+        matched: list[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule]] = []
         for decision in dedupe_items(tuple(items)):
             if not decision.accepted:
                 continue
@@ -189,6 +192,13 @@ def run_once(
                 if not dry_run:
                     state.record_seen_item(decision.item)
                 continue
+            if rule is None:
+                continue
+            if not candidate.feed_item.is_season_pack and _pack_preference_key(candidate) in pack_preferences:
+                continue
+            matched.append((decision, candidate, rule))
+
+        for decision, candidate, rule in _prefer_allowed_season_packs(matched):
             job_id = job_id_for_candidate(candidate)
             submit_result = qbittorrent.submit(candidate, rule=rule, dry_run=dry_run)
             status = _job_status(submit_result, dry_run=dry_run)
@@ -210,6 +220,10 @@ def run_once(
                 )
                 if submit_result.success:
                     state.record_seen_item(decision.item)
+                    if candidate.feed_item.is_season_pack and _rule_allows_pack(rule):
+                        key = _pack_preference_key(candidate)
+                        state.record_pack_preference(*key, job_id=job_id, dedupe_key=decision.dedupe_key)
+                        pack_preferences.add(key)
                 else:
                     state.record_failure(job_id, "qbittorrent", submit_result.message, attempts=1, recoverable=submit_result.retryable)
             event = NotificationEvent(
@@ -539,6 +553,52 @@ def _first_candidate(item, rules: tuple[SubscriptionRule, ...]) -> tuple[Release
         if result.accepted and result.candidate is not None:
             return result.candidate, result.rule
     return None, None
+
+
+def _prefer_allowed_season_packs(matches: list[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule]]) -> tuple[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule], ...]:
+    pack_groups = {
+        _pack_preference_key(candidate)
+        for _, candidate, rule in matches
+        if candidate.feed_item.is_season_pack and _rule_allows_pack(rule)
+    }
+    return tuple(
+        match
+        for match in matches
+        if match[1].feed_item.is_season_pack or _pack_preference_key(match[1]) not in pack_groups
+    )
+
+
+def _rule_allows_pack(rule: SubscriptionRule) -> bool:
+    return rule.allow_packs or rule.episode_mode in {RuleEpisodeMode.PACK, RuleEpisodeMode.BOTH}
+
+
+def _pack_preference_key(candidate: ReleaseCandidate) -> tuple[str, str, int]:
+    return (candidate.rule_name, _series_key(candidate.title), _season_number(candidate.title))
+
+
+def _series_key(title: str) -> str:
+    value = re.sub(r"^\s*\[[^\]]+\]\s*", " ", title)
+    value = re.sub(r"\[[^\]]*\]|\([^\)]*\)", " ", value)
+    value = re.sub(r"\bS\d{1,2}\s*E\d{1,3}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bS\d{1,2}\b|\bSeason\s*\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)\s+Season\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"第\s*\d{1,2}\s*[季期]", " ", value)
+    value = re.sub(r"(?:^|[\s_\-.])\d{1,3}(?:v\d+)?(?:[\s_\-.]|$)", " ", value)
+    value = re.sub(r"\b(?:480|720|1080|2160)p\b|\b4k\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"季度全集|季度|全集|合集|season pack|batch|complete", " ", value, flags=re.IGNORECASE)
+    return re.sub(r"[_\W]+", " ", value.casefold()).strip()
+
+
+def _season_number(title: str) -> int:
+    for pattern in (
+        r"\bS(?P<season>\d{1,2})(?:\s*E\d{1,3})?\b",
+        r"\bSeason\s*(?P<season>\d{1,2})\b",
+        r"\b(?P<season>\d{1,2})(?:st|nd|rd|th)\s+Season\b",
+        r"第\s*(?P<season>\d{1,2})\s*[季期]",
+    ):
+        match = re.search(pattern, title, flags=re.IGNORECASE)
+        if match:
+            return int(match.group("season"))
+    return 1
 
 
 def _job_status(result: QbittorrentSubmitResult, *, dry_run: bool) -> DownloadJobStatus:
