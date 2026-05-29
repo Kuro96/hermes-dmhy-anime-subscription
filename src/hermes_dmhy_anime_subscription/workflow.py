@@ -590,7 +590,11 @@ def _rule_allows_pack(rule: SubscriptionRule) -> bool:
 
 
 def _season_pack_satisfaction_key(candidate: ReleaseCandidate) -> tuple[str, str, int]:
-    return (candidate.rule_name, _series_key(candidate.title), _season_number(candidate.title))
+    return (
+        candidate.rule_name,
+        _series_key(candidate.title, strip_bare_numbers=not candidate.feed_item.is_season_pack),
+        _season_number(candidate.title),
+    )
 
 
 def _season_pack_satisfaction_metadata(candidate: ReleaseCandidate, rule: SubscriptionRule) -> dict[str, object]:
@@ -600,11 +604,11 @@ def _season_pack_satisfaction_metadata(candidate: ReleaseCandidate, rule: Subscr
     return {"season_pack_satisfaction": {"rule_name": rule_name, "series_key": series_key, "season": season}}
 
 
-def _series_key(title: str) -> str:
+def _series_key(title: str, *, strip_bare_numbers: bool = True) -> str:
     value = _strip_leading_release_group(title)
     value = re.sub(r"\[([^\]]*)\]", _series_key_bracket_replacement, value)
     value = re.sub(r"\([^\)]*\)", " ", value)
-    return _normalize_series_key(value)
+    return _normalize_series_key(value, strip_bare_numbers=strip_bare_numbers)
 
 
 def _strip_leading_release_group(title: str) -> str:
@@ -636,12 +640,14 @@ def _is_series_key_metadata_bracket(content: str) -> bool:
     )
 
 
-def _normalize_series_key(value: str) -> str:
+def _normalize_series_key(value: str, *, strip_bare_numbers: bool = True) -> str:
     value = re.sub(r"\bS\d{1,2}\s*E\d{1,3}\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\bS\d{1,2}\b|\bSeason\s*\d{1,2}\b|\b\d{1,2}(?:st|nd|rd|th)\s+Season\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"第\s*\d{1,2}\s*[季期]", " ", value)
     value = re.sub(r"第\s*\d{1,3}\s*[話话集]", " ", value)
-    value = re.sub(r"(?:^|[\s_\-.])\d{1,3}(?:v\d+)?(?:[\s_\-.]|$)", " ", value)
+    if strip_bare_numbers:
+        value = re.sub(r"(?:^|[\s_\-.])\d{1,3}(?:v\d+)?(?:[\s_\-.]|$)(?!\s*[-–—]\s*\d{1,3}\b)", " ", value)
+        value = re.sub(r"(?:\s*[-–—]\s*\d{1,3}(?:v\d+)?)*(?:\s*[-–—]\s*)\s*$", " ", value)
     value = re.sub(r"\b(?:480|720|1080|2160)p\b|\b4k\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"季度全集|季度|全集|合集|season pack|batch|complete", " ", value, flags=re.IGNORECASE)
     return re.sub(r"[_\W]+", " ", value.casefold()).strip()

@@ -292,6 +292,185 @@ def test_run_once_apply_satisfied_pack_waits_for_completion_and_accepts_later_pa
         }
 
 
+def test_run_once_completed_numbered_sequel_pack_does_not_suppress_base_series_episode(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    fake_qbit = FakeQbittorrentClient()
+    pack_title = "[ExampleSub] Example Anime 2 季度全集 [1080p]"
+
+    pack_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _season_pack_rss(
+                info_hash="6666666666666666666666666666666666666666",
+                guid="season-pack-200006",
+                title=pack_title,
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+    monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash="6666666666666666666666666666666666666666",
+                name=pack_title,
+                state="uploading",
+                progress=1.0,
+            ),
+        ),
+        dry_run=False,
+        organize=False,
+    )
+    episode_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                episode="01",
+                info_hash="7777777777777777777777777777777777777777",
+                guid="episode-200007",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert len(pack_result.candidates) == 1
+    assert pack_result.candidates[0].candidate.feed_item.is_season_pack is True
+    assert episode_result.parsed_items == 1
+    assert len(episode_result.candidates) == 1
+    assert episode_result.candidates[0].candidate.feed_item.is_season_pack is False
+    assert len(fake_qbit.submissions) == 2
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.list_satisfied_season_packs() == (("example-show", "example anime 2", 1),)
+        assert state.has_seen_item("infohash:7777777777777777777777777777777777777777")
+
+
+def test_run_once_numbered_sequel_range_suppresses_same_numbered_sequel_episode_in_feed_and_after_completion(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    fake_qbit = FakeQbittorrentClient()
+    sequel_episode_title = "[ExampleSub] Example Anime 2 - 01 - 02 [1080p][CHS]"
+    sequel_pack_title = "[ExampleSub] Example Anime 2 季度全集 [1080p]"
+
+    in_feed_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _numbered_sequel_episode_and_pack_rss(episode_title=sequel_episode_title),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+    monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash="dddddddddddddddddddddddddddddddddddddddd",
+                name=sequel_pack_title,
+                state="uploading",
+                progress=1.0,
+            ),
+        ),
+        dry_run=False,
+        organize=False,
+    )
+    after_completion_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                title=sequel_episode_title,
+                episode="01",
+                info_hash="7777777777777777777777777777777777777777",
+                guid="episode-200007",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert in_feed_result.parsed_items == 2
+    assert len(in_feed_result.candidates) == 1
+    assert in_feed_result.candidates[0].candidate.feed_item.is_season_pack is True
+    assert after_completion_result.parsed_items == 1
+    assert len(after_completion_result.candidates) == 0
+    assert len(fake_qbit.submissions) == 1
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.list_satisfied_season_packs() == (("example-show", "example anime 2", 1),)
+        assert state.has_seen_item("infohash:dddddddddddddddddddddddddddddddddddddddd")
+        assert not state.has_seen_item("infohash:7777777777777777777777777777777777777777")
+
+
+def test_run_once_base_range_suppresses_same_base_range_episode_in_feed_and_after_completion(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    fake_qbit = FakeQbittorrentClient()
+
+    pack_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _numbered_sequel_episode_and_pack_rss(
+                episode_title="[ExampleSub] Example Anime - 01 - 02 [1080p][CHS]",
+                pack_title="[ExampleSub] Example Anime 季度全集 [1080p]",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+    monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash="dddddddddddddddddddddddddddddddddddddddd",
+                name="[ExampleSub] Example Anime 季度全集 [1080p]",
+                state="uploading",
+                progress=1.0,
+            ),
+        ),
+        dry_run=False,
+        organize=False,
+    )
+    after_completion_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                title="[ExampleSub] Example Anime - 01 - 02 [1080p][CHS]",
+                episode="01",
+                info_hash="7777777777777777777777777777777777777777",
+                guid="episode-200007",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert pack_result.parsed_items == 2
+    assert len(pack_result.candidates) == 1
+    assert pack_result.candidates[0].candidate.feed_item.is_season_pack is True
+    assert after_completion_result.parsed_items == 1
+    assert len(after_completion_result.candidates) == 0
+    assert len(fake_qbit.submissions) == 1
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.list_satisfied_season_packs() == (("example-show", "example anime", 1),)
+        assert state.has_seen_item("infohash:dddddddddddddddddddddddddddddddddddddddd")
+        assert not state.has_seen_item("infohash:7777777777777777777777777777777777777777")
+
+
 def test_run_once_failed_pack_does_not_suppress_later_episode(tmp_path, monkeypatch):
     config_path = _config(tmp_path, organizer_mode="move")
     raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -388,6 +567,10 @@ def test_series_key_falls_back_to_bracketed_series_after_release_group():
     assert workflow._series_key("[ExampleSub] 我推的孩子 第01話 [1080p]") == "我推的孩子"
     assert workflow._series_key("[ExampleSub] 我推的孩子 第01话 [1080p]") == "我推的孩子"
     assert workflow._series_key("[ExampleSub] 我推的孩子 第01集 [1080p]") == "我推的孩子"
+    assert workflow._series_key("[ExampleSub] Example Anime - 01 - 02 [1080p][CHS]") == "example anime"
+    assert workflow._series_key("[ExampleSub] Example Anime 2 - 01 - 02 [1080p][CHS]") == "example anime 2"
+    assert workflow._series_key("[ExampleSub] Example Anime S02 - 01 - 02 [1080p][CHS]") == "example anime"
+    assert workflow._series_key("[ExampleSub] Example Anime Season 2 - 01 - 02 [1080p][CHS]") == "example anime"
 
 
 @pytest.mark.parametrize("episode_marker", ["第01話", "第01话", "第01集"])
@@ -467,6 +650,30 @@ def test_run_once_allowed_pack_does_not_suppress_different_bracketed_series_epis
     assert [submission[0].title for submission in fake_qbit.submissions] == [
         "[Show A] [01][1080p]",
         "[Show B] 季度全集 [1080p]",
+    ]
+
+
+def test_run_once_allowed_numbered_sequel_pack_does_not_suppress_base_series_episode(tmp_path):
+    config_path = _config(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    fake_qbit = FakeQbittorrentClient()
+
+    result = run_once(
+        config_path,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _numbered_sequel_episode_and_pack_rss(),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert result.parsed_items == 2
+    assert len(result.candidates) == 2
+    assert [submission[0].title for submission in fake_qbit.submissions] == [
+        "[ExampleSub] Example Anime - 01 [1080p][CHS]",
+        "[ExampleSub] Example Anime 2 季度全集 [1080p]",
     ]
 
 
@@ -1475,13 +1682,44 @@ def _different_bracketed_show_episode_and_pack_rss():
 """
 
 
-def _episode_rss(*, episode, info_hash, guid):
+def _numbered_sequel_episode_and_pack_rss(*, episode_title="[ExampleSub] Example Anime - 01 [1080p][CHS]", pack_title="[ExampleSub] Example Anime 2 季度全集 [1080p]"):
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Anime RSS</title>
+    <item>
+      <title>{episode_title}</title>
+      <link>https://share.dmhy.org/topics/view/200021_example_anime_01.html</link>
+      <pubDate>Sun, 24 May 2026 10:30:00 +0000</pubDate>
+      <description>Example release description</description>
+      <author>ExampleSub</author>
+      <category>動畫</category>
+      <guid>episode-200021</guid>
+      <enclosure url="magnet:?xt=urn:btih:cccccccccccccccccccccccccccccccccccccccc&amp;dn=Episode" type="application/x-bittorrent" />
+    </item>
+    <item>
+      <title>{pack_title}</title>
+      <link>https://share.dmhy.org/topics/view/200022_example_anime_2_batch.html?sort_id=31</link>
+      <pubDate>Sun, 24 May 2026 11:00:00 +0000</pubDate>
+      <description>Quarterly complete sequel season pack</description>
+      <author>ExampleSub</author>
+      <category>季度全集</category>
+      <guid>season-pack-200022</guid>
+      <enclosure url="magnet:?xt=urn:btih:dddddddddddddddddddddddddddddddddddddddd&amp;dn=SeasonPack" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""".format(episode_title=episode_title, pack_title=pack_title)
+
+
+def _episode_rss(*, episode, info_hash, guid, title="[ExampleSub] Example Anime - {episode} [1080p][CHS]"):
+    resolved_title = title.format(episode=episode)
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
     <title>DMHY Anime RSS</title>
     <item>
-      <title>[ExampleSub] Example Anime - {episode} [1080p][CHS]</title>
+      <title>{resolved_title}</title>
       <link>https://share.dmhy.org/topics/view/200003_example_anime_{episode}.html</link>
       <pubDate>Mon, 25 May 2026 10:30:00 +0000</pubDate>
       <description>Example release description</description>
@@ -1495,13 +1733,13 @@ def _episode_rss(*, episode, info_hash, guid):
 """
 
 
-def _season_pack_rss(*, info_hash, guid):
+def _season_pack_rss(*, info_hash, guid, title="[ExampleSub] Example Anime 季度全集 [1080p]"):
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0">
   <channel>
     <title>DMHY Anime RSS</title>
     <item>
-      <title>[ExampleSub] Example Anime 季度全集 [1080p]</title>
+      <title>{title}</title>
       <link>https://share.dmhy.org/topics/view/200004_example_anime_batch.html?sort_id=31</link>
       <pubDate>Mon, 25 May 2026 11:00:00 +0000</pubDate>
       <description>Quarterly complete season pack</description>
