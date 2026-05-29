@@ -664,10 +664,22 @@ def _completed_rule_episodes(state: SubscriptionState, rule_name: str) -> set[in
         organizer_outcome = job.get("organizer_outcome")
         if organizer_outcome != "applied":
             continue
-        episode = _integral_episode(metadata.get("episode"))
-        if episode is not None:
-            completed.add(episode)
+        completed.update(_metadata_episodes(metadata))
     return completed
+
+
+def _metadata_episodes(metadata: dict[str, object]) -> set[int]:
+    episodes: set[int] = set()
+    value = metadata.get("episodes")
+    if isinstance(value, list):
+        for item in value:
+            episode = _integral_episode(item)
+            if episode is not None:
+                episodes.add(episode)
+    episode = _integral_episode(metadata.get("episode"))
+    if episode is not None:
+        episodes.add(episode)
+    return episodes
 
 
 def _integral_episode(value: object) -> int | None:
@@ -724,7 +736,10 @@ def _record_organizer_actions(state: SubscriptionState, result: OrganizerResult,
         if job is not None:
             metadata = dict(job["metadata"])
             if action.episode is not None:
+                episodes = _metadata_episodes(metadata)
+                episodes.add(action.episode)
                 metadata["episode"] = action.episode
+                metadata["episodes"] = sorted(episodes)
             if action.season is not None:
                 metadata["season"] = action.season
             state.upsert_job(

@@ -756,6 +756,65 @@ def test_monitor_once_archives_rule_after_bangumi_main_episodes_are_completed_an
         assert state.is_rule_archived("example-show") is True
 
 
+def test_monitor_once_archives_rule_after_one_job_organizes_multiple_bangumi_episodes(tmp_path):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["bangumi_subject_id"] = 12345
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+    source = tmp_path / "downloads" / "Example Anime Complete Pack"
+    episodes = tuple(range(1, 13))
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-pack",
+            dedupe_key=f"infohash:{torrent_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=torrent_hash,
+            metadata={"rule_name": "example-show", "title": "[ExampleSub] Example Anime Complete Pack"},
+        )
+
+    def organize_pack(item, config):
+        return OrganizerResult(
+            item.job_id,
+            config.organizer.mode,
+            tuple(
+                OrganizerAction(
+                    Path(item.source_path) / f"Example Anime - {episode:02d}.mkv",
+                    tmp_path / "library" / f"Example Anime - S01E{episode:02d}.mkv",
+                    "applied",
+                    "video",
+                    episode=episode,
+                )
+                for episode in episodes
+            ),
+        )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash=torrent_hash,
+                name="[ExampleSub] Example Anime Complete Pack",
+                state="uploading",
+                progress=1.0,
+                content_path=str(source),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(subject_id, 12, episodes),
+            organizer_runner=organize_pack,
+        ),
+    )
+
+    assert [event.event_type for event in result.events] == ["download_completed", "subscription_archived"]
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-pack")
+        assert job is not None
+        assert job["metadata"]["episodes"] == list(episodes)
+        assert state.is_rule_archived("example-show") is True
+
+
 @pytest.mark.parametrize("organizer_outcome", [None, "planned"])
 def test_monitor_once_does_not_archive_completed_rule_without_applied_organizer_outcome(tmp_path, organizer_outcome):
     config_path = _config(tmp_path, organizer_mode="move")
