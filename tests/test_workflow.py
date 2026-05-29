@@ -173,7 +173,7 @@ def test_retryable_qbittorrent_submit_failure_remains_eligible_until_success(tmp
     assert job["status"] == DownloadJobStatus.SUBMITTED.value
 
 
-def test_run_once_apply_prefers_allowed_season_pack_without_recording_suppressed_episode(tmp_path, monkeypatch):
+def test_run_once_apply_records_satisfied_season_pack_and_ignores_later_episode(tmp_path, monkeypatch):
     config_path = _config(tmp_path, organizer_mode="move")
     raw = json.loads(config_path.read_text(encoding="utf-8"))
     raw["subscriptions"]["rules"][0]["allow_packs"] = True
@@ -183,23 +183,77 @@ def test_run_once_apply_prefers_allowed_season_pack_without_recording_suppressed
     monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
     fake_qbit = FakeQbittorrentClient()
 
-    dependencies = WorkflowDependencies(
+    pack_dependencies = WorkflowDependencies(
         feed_fetcher=lambda _url: _episode_and_pack_rss(),
         qbittorrent_factory=lambda _config: fake_qbit,
     )
-    result = run_once(config_path, dry_run=False, dependencies=dependencies)
-    repeat = run_once(config_path, dry_run=False, dependencies=dependencies)
+    episode_dependencies = WorkflowDependencies(
+        feed_fetcher=lambda _url: _episode_rss(
+            episode="02",
+            info_hash="3333333333333333333333333333333333333333",
+            guid="episode-200003",
+        ),
+        qbittorrent_factory=lambda _config: fake_qbit,
+    )
+    result = run_once(config_path, dry_run=False, dependencies=pack_dependencies)
+    later_episode = run_once(config_path, dry_run=False, dependencies=episode_dependencies)
 
     assert result.parsed_items == 2
     assert len(result.candidates) == 1
-    assert len(repeat.candidates) == 0
+    assert later_episode.parsed_items == 1
+    assert len(later_episode.candidates) == 0
     assert result.candidates[0].candidate.feed_item.is_season_pack is True
     assert len(fake_qbit.submissions) == 1
     assert fake_qbit.submissions[0][0].title == "[ExampleSub] Example Anime 季度全集 [1080p]"
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         assert state.has_seen_item("infohash:2222222222222222222222222222222222222222")
         assert not state.has_seen_item("infohash:1111111111111111111111111111111111111111")
+        assert not state.has_seen_item("infohash:3333333333333333333333333333333333333333")
+        assert state.list_satisfied_season_packs() == (("example-show", "example anime", 1),)
         assert [job["torrent_hash"] for job in state.list_jobs()] == ["2222222222222222222222222222222222222222"]
+
+
+def test_run_once_dry_run_allowed_pack_does_not_satisfy_later_episode(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["allow_packs"] = True
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    state_path = tmp_path / "state.sqlite3"
+    fake_qbit = FakeQbittorrentClient()
+
+    dry_result = run_once(
+        config_path,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_and_pack_rss(),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+    assert not state_path.exists()
+
+    apply_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                episode="02",
+                info_hash="3333333333333333333333333333333333333333",
+                guid="episode-200003",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert len(dry_result.candidates) == 1
+    assert dry_result.candidates[0].candidate.feed_item.is_season_pack is True
+    assert len(apply_result.candidates) == 1
+    assert apply_result.candidates[0].candidate.feed_item.is_season_pack is False
+    assert len(fake_qbit.submissions) == 2
+    with SubscriptionState(state_path) as state:
+        assert state.list_satisfied_season_packs() == ()
+        assert state.has_seen_item("infohash:3333333333333333333333333333333333333333")
 
 
 def test_run_once_episode_only_rule_keeps_episode_when_pack_is_present(tmp_path):
@@ -837,6 +891,26 @@ def _episode_and_pack_rss():
       <category>季度全集</category>
       <guid>season-pack-200002</guid>
       <enclosure url="magnet:?xt=urn:btih:2222222222222222222222222222222222222222&amp;dn=SeasonPack" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+"""
+
+
+def _episode_rss(*, episode, info_hash, guid):
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Anime RSS</title>
+    <item>
+      <title>[ExampleSub] Example Anime - {episode} [1080p][CHS]</title>
+      <link>https://share.dmhy.org/topics/view/200003_example_anime_{episode}.html</link>
+      <pubDate>Mon, 25 May 2026 10:30:00 +0000</pubDate>
+      <description>Example release description</description>
+      <author>ExampleSub</author>
+      <category>動畫</category>
+      <guid>{guid}</guid>
+      <enclosure url="magnet:?xt=urn:btih:{info_hash}&amp;dn=Episode" type="application/x-bittorrent" />
     </item>
   </channel>
 </rss>

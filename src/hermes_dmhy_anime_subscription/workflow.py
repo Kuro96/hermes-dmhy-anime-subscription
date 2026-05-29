@@ -180,7 +180,7 @@ def run_once(
         parse_errors += len(parsed.errors)
 
     with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
-        pack_preferences = set(state.list_pack_preferences())
+        satisfied_seasons = set(state.list_satisfied_season_packs())
         matched: list[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule]] = []
         for decision in dedupe_items(tuple(items)):
             if not decision.accepted:
@@ -194,11 +194,11 @@ def run_once(
                 continue
             if rule is None:
                 continue
-            if not candidate.feed_item.is_season_pack and _pack_preference_key(candidate) in pack_preferences:
+            if _season_pack_satisfaction_key(candidate) in satisfied_seasons:
                 continue
             matched.append((decision, candidate, rule))
 
-        for decision, candidate, rule in _prefer_allowed_season_packs(matched):
+        for decision, candidate, rule in _suppress_episodes_for_allowed_season_packs(matched):
             job_id = job_id_for_candidate(candidate)
             submit_result = qbittorrent.submit(candidate, rule=rule, dry_run=dry_run)
             status = _job_status(submit_result, dry_run=dry_run)
@@ -221,9 +221,9 @@ def run_once(
                 if submit_result.success:
                     state.record_seen_item(decision.item)
                     if candidate.feed_item.is_season_pack and _rule_allows_pack(rule):
-                        key = _pack_preference_key(candidate)
-                        state.record_pack_preference(*key, job_id=job_id, dedupe_key=decision.dedupe_key)
-                        pack_preferences.add(key)
+                        key = _season_pack_satisfaction_key(candidate)
+                        state.record_satisfied_season_pack(*key, job_id=job_id, dedupe_key=decision.dedupe_key)
+                        satisfied_seasons.add(key)
                 else:
                     state.record_failure(job_id, "qbittorrent", submit_result.message, attempts=1, recoverable=submit_result.retryable)
             event = NotificationEvent(
@@ -555,16 +555,16 @@ def _first_candidate(item, rules: tuple[SubscriptionRule, ...]) -> tuple[Release
     return None, None
 
 
-def _prefer_allowed_season_packs(matches: list[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule]]) -> tuple[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule], ...]:
+def _suppress_episodes_for_allowed_season_packs(matches: list[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule]]) -> tuple[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule], ...]:
     pack_groups = {
-        _pack_preference_key(candidate)
+        _season_pack_satisfaction_key(candidate)
         for _, candidate, rule in matches
         if candidate.feed_item.is_season_pack and _rule_allows_pack(rule)
     }
     return tuple(
         match
         for match in matches
-        if match[1].feed_item.is_season_pack or _pack_preference_key(match[1]) not in pack_groups
+        if match[1].feed_item.is_season_pack or _season_pack_satisfaction_key(match[1]) not in pack_groups
     )
 
 
@@ -572,7 +572,7 @@ def _rule_allows_pack(rule: SubscriptionRule) -> bool:
     return rule.allow_packs or rule.episode_mode in {RuleEpisodeMode.PACK, RuleEpisodeMode.BOTH}
 
 
-def _pack_preference_key(candidate: ReleaseCandidate) -> tuple[str, str, int]:
+def _season_pack_satisfaction_key(candidate: ReleaseCandidate) -> tuple[str, str, int]:
     return (candidate.rule_name, _series_key(candidate.title), _season_number(candidate.title))
 
 

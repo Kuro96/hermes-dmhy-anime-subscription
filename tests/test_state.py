@@ -51,6 +51,25 @@ def test_job_and_torrent_hash_recording_are_idempotent(tmp_path):
     assert job["metadata"] == {"rule": "example"}
 
 
+def test_satisfied_season_pack_recording_is_idempotent(tmp_path):
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.record_satisfied_season_pack(
+            "Example anime",
+            "example anime",
+            1,
+            job_id="job-pack",
+            dedupe_key="infohash:pack",
+        ) is True
+        assert state.record_satisfied_season_pack(
+            "Example anime",
+            "example anime",
+            1,
+            job_id="job-pack",
+            dedupe_key="infohash:pack",
+        ) is False
+        assert state.list_satisfied_season_packs() == (("Example anime", "example anime", 1),)
+
+
 def test_failure_and_organizer_outcome_slots_are_available(tmp_path):
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         state.record_failure("job-1", "download", "temporary failure", attempts=2)

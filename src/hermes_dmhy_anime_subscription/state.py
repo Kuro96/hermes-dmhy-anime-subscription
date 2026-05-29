@@ -82,12 +82,12 @@ class SubscriptionState(AbstractContextManager["SubscriptionState"]):
             )
         return cursor.rowcount == 1
 
-    def record_pack_preference(self, rule_name: str, series_key: str, season: int, *, job_id: str, dedupe_key: str) -> bool:
+    def record_satisfied_season_pack(self, rule_name: str, series_key: str, season: int, *, job_id: str, dedupe_key: str) -> bool:
         now = _now()
         with self._connection:
             cursor = self._connection.execute(
                 """
-                INSERT OR IGNORE INTO pack_preferences
+                INSERT OR IGNORE INTO satisfied_season_packs
                     (rule_name, series_key, season, job_id, dedupe_key, recorded_at)
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
@@ -95,8 +95,8 @@ class SubscriptionState(AbstractContextManager["SubscriptionState"]):
             )
         return cursor.rowcount == 1
 
-    def list_pack_preferences(self) -> tuple[tuple[str, str, int], ...]:
-        cursor = self._connection.execute("SELECT rule_name, series_key, season FROM pack_preferences")
+    def list_satisfied_season_packs(self) -> tuple[tuple[str, str, int], ...]:
+        cursor = self._connection.execute("SELECT rule_name, series_key, season FROM satisfied_season_packs")
         return tuple((str(row["rule_name"]), str(row["series_key"]), int(row["season"])) for row in cursor.fetchall())
 
     def upsert_job(
@@ -248,7 +248,7 @@ class SubscriptionState(AbstractContextManager["SubscriptionState"]):
                     first_seen_at TEXT NOT NULL
                 );
 
-                CREATE TABLE IF NOT EXISTS pack_preferences (
+                CREATE TABLE IF NOT EXISTS satisfied_season_packs (
                     rule_name TEXT NOT NULL,
                     series_key TEXT NOT NULL,
                     season INTEGER NOT NULL,
