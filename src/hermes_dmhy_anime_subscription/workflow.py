@@ -194,7 +194,7 @@ def run_once(
                 continue
             if rule is None:
                 continue
-            if not candidate.feed_item.is_season_pack and _season_pack_satisfaction_key(candidate) in satisfied_seasons:
+            if not candidate.feed_item.is_season_pack and _rule_allows_pack(rule) and _season_pack_satisfaction_key(candidate) in satisfied_seasons:
                 continue
             matched.append((decision, candidate, rule))
 

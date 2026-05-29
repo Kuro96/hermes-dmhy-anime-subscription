@@ -229,6 +229,42 @@ def test_run_once_apply_satisfied_pack_suppresses_later_episode_but_accepts_late
         }
 
 
+def test_run_once_episode_only_rule_ignores_persisted_satisfied_pack(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    state_path = tmp_path / "state.sqlite3"
+    with SubscriptionState(state_path) as state:
+        state.record_satisfied_season_pack(
+            "example-show",
+            "example anime",
+            1,
+            job_id="dmhy-pack",
+            dedupe_key="infohash:pack",
+        )
+    fake_qbit = FakeQbittorrentClient()
+
+    result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                episode="02",
+                info_hash="3333333333333333333333333333333333333333",
+                guid="episode-200003",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert result.parsed_items == 1
+    assert len(result.candidates) == 1
+    assert result.candidates[0].candidate.feed_item.is_season_pack is False
+    assert len(fake_qbit.submissions) == 1
+    with SubscriptionState(state_path) as state:
+        assert state.has_seen_item("infohash:3333333333333333333333333333333333333333")
+
+
 def test_series_key_falls_back_to_bracketed_series_after_release_group():
     assert workflow._series_key("[Show A] [01][1080p]") == "show a"
     assert workflow._series_key("[Show B] 季度全集 [1080p]") == "show b"
