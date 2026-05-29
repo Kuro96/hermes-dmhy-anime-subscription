@@ -208,6 +208,15 @@ def run_once(
             submit_result = qbittorrent.submit(candidate, rule=rule, dry_run=dry_run)
             status = _job_status(submit_result, dry_run=dry_run)
             if not dry_run:
+                metadata = {
+                    "title": candidate.title,
+                    "rule_name": candidate.rule_name,
+                    "episode": _candidate_episode(candidate),
+                    "dry_run": dry_run,
+                    "submit_status": submit_result.status,
+                    "qbittorrent_category": submit_result.plan.category,
+                }
+                metadata.update(_season_pack_satisfaction_metadata(candidate, rule))
                 state.upsert_job(
                     job_id,
                     dedupe_key=decision.dedupe_key,
@@ -215,21 +224,10 @@ def run_once(
                     torrent_hash=decision.item.info_hash,
                     retry_count=0,
                     last_error=submit_result.message if not submit_result.success else None,
-                    metadata={
-                        "title": candidate.title,
-                        "rule_name": candidate.rule_name,
-                        "episode": _candidate_episode(candidate),
-                        "dry_run": dry_run,
-                        "submit_status": submit_result.status,
-                        "qbittorrent_category": submit_result.plan.category,
-                    },
+                    metadata=metadata,
                 )
                 if submit_result.success:
                     state.record_seen_item(decision.item)
-                    if candidate.feed_item.is_season_pack and _rule_allows_pack(rule):
-                        key = _season_pack_satisfaction_key(candidate)
-                        state.record_satisfied_season_pack(*key, job_id=job_id, dedupe_key=decision.dedupe_key)
-                        satisfied_seasons.add(key)
                 else:
                     state.record_failure(job_id, "qbittorrent", submit_result.message, attempts=1, recoverable=submit_result.retryable)
             event = NotificationEvent(
@@ -278,6 +276,8 @@ def monitor_once(
                 organizer_result = organizer_runner(organizer_input, config)
                 organizer_results.append(organizer_result)
                 _record_organizer_actions(state, organizer_result, dry_run=dry_run)
+        if not dry_run:
+            _record_completed_satisfied_season_packs(state, config)
         archive_events = _archive_completed_rules(state, config, deps) if not dry_run else ()
         all_events = (*result.events, *archive_events)
         webhook_results = tuple(_notify(notifier, event, dry_run=dry_run) for event in (*all_events, *[event for item in organizer_results for event in item.events]))
@@ -593,6 +593,13 @@ def _season_pack_satisfaction_key(candidate: ReleaseCandidate) -> tuple[str, str
     return (candidate.rule_name, _series_key(candidate.title), _season_number(candidate.title))
 
 
+def _season_pack_satisfaction_metadata(candidate: ReleaseCandidate, rule: SubscriptionRule) -> dict[str, object]:
+    if not candidate.feed_item.is_season_pack or not _rule_allows_pack(rule):
+        return {}
+    rule_name, series_key, season = _season_pack_satisfaction_key(candidate)
+    return {"season_pack_satisfaction": {"rule_name": rule_name, "series_key": series_key, "season": season}}
+
+
 def _series_key(title: str) -> str:
     value = _strip_leading_release_group(title)
     value = re.sub(r"\[([^\]]*)\]", _series_key_bracket_replacement, value)
@@ -858,6 +865,29 @@ def _record_organizer_actions(state: SubscriptionState, result: OrganizerResult,
                 metadata=metadata,
             )
         state.record_organizer_outcome(result.job_id, outcome, str(action.source_path), str(action.destination_path))
+
+
+def _record_completed_satisfied_season_packs(state: SubscriptionState, config: PluginConfig) -> None:
+    pack_rule_names = {rule.name for rule in config.subscriptions.rules if _rule_allows_pack(rule)}
+    for job in state.list_jobs(statuses=(DownloadJobStatus.COMPLETED.value,)):
+        metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+        satisfaction = metadata.get("season_pack_satisfaction")
+        if not isinstance(satisfaction, dict):
+            continue
+        rule_name = satisfaction.get("rule_name")
+        series_key = satisfaction.get("series_key")
+        season = _integral_episode(satisfaction.get("season"))
+        if not isinstance(rule_name, str) or rule_name not in pack_rule_names:
+            continue
+        if not isinstance(series_key, str) or season is None:
+            continue
+        state.record_satisfied_season_pack(
+            rule_name,
+            series_key,
+            season,
+            job_id=str(job["job_id"]),
+            dedupe_key=str(job["dedupe_key"]),
+        )
 
 
 _ACTIVE_STATUSES = (
