@@ -669,6 +669,14 @@ def _completed_rule_episodes(state: SubscriptionState, rule_name: str) -> set[in
 
 
 def _metadata_episodes(metadata: dict[str, object]) -> set[int]:
+    episodes = _metadata_episode_list(metadata)
+    episode = _integral_episode(metadata.get("episode"))
+    if episode is not None:
+        episodes.add(episode)
+    return episodes
+
+
+def _metadata_episode_list(metadata: dict[str, object]) -> set[int]:
     episodes: set[int] = set()
     value = metadata.get("episodes")
     if isinstance(value, list):
@@ -676,9 +684,6 @@ def _metadata_episodes(metadata: dict[str, object]) -> set[int]:
             episode = _integral_episode(item)
             if episode is not None:
                 episodes.add(episode)
-    episode = _integral_episode(metadata.get("episode"))
-    if episode is not None:
-        episodes.add(episode)
     return episodes
 
 
@@ -735,12 +740,18 @@ def _record_organizer_actions(state: SubscriptionState, result: OrganizerResult,
         job = state.get_job(result.job_id)
         if job is not None:
             metadata = dict(job["metadata"])
-            if action.episode is not None:
-                episodes = _metadata_episodes(metadata)
+            applied = not dry_run and action.status == "applied"
+            if applied and action.episode is not None:
+                # During organizer action recording, the candidate-level legacy scalar
+                # metadata["episode"] is not proof that that episode was organized.
+                # Only episodes already recorded by applied actions may be carried
+                # forward here; _completed_rule_episodes still reads the scalar for
+                # older completed jobs that predate metadata["episodes"].
+                episodes = _metadata_episode_list(metadata)
                 episodes.add(action.episode)
                 metadata["episode"] = action.episode
                 metadata["episodes"] = sorted(episodes)
-            if action.season is not None:
+            if applied and action.season is not None:
                 metadata["season"] = action.season
             state.upsert_job(
                 result.job_id,
