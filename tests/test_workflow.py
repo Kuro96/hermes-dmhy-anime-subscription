@@ -306,9 +306,10 @@ def test_series_key_falls_back_to_bracketed_series_after_release_group():
     assert workflow._series_key("[ExampleSub] 我推的孩子 全集 [1080p]") == "我推的孩子"
     assert workflow._series_key("[ExampleSub] 我推的孩子 第01話 [1080p]") == "我推的孩子"
     assert workflow._series_key("[ExampleSub] 我推的孩子 第01话 [1080p]") == "我推的孩子"
+    assert workflow._series_key("[ExampleSub] 我推的孩子 第01集 [1080p]") == "我推的孩子"
 
 
-@pytest.mark.parametrize("episode_marker", ["第01話", "第01话"])
+@pytest.mark.parametrize("episode_marker", ["第01話", "第01话", "第01集"])
 def test_run_once_satisfied_pack_suppresses_later_cjk_episode_marker(tmp_path, monkeypatch, episode_marker):
     config_path = _config(tmp_path, organizer_mode="move")
     raw = json.loads(config_path.read_text(encoding="utf-8"))
