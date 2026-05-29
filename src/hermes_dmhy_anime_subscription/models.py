@@ -101,6 +101,7 @@ class SubscriptionRule:
     feed_names: tuple[str, ...] = ()
     save_path: str | None = None
     category: str | None = None
+    bangumi_subject_id: int | None = None
     priority: int = 0
     enabled: bool = True
 

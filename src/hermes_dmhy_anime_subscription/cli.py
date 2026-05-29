@@ -212,6 +212,7 @@ def _feed_file_dependencies(path: str | None) -> WorkflowDependencies | None:
 def _summary_json(summary) -> str:
     return json.dumps(
         {
+            "archived_rules": summary.archived_rules,
             "processed": summary.processed,
             "pending": summary.pending,
             "failed": summary.failed,

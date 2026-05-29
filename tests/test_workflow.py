@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -136,6 +137,38 @@ def test_run_once_dry_run_is_repeatable_and_does_not_create_state(tmp_path):
     assert not state_path.exists()
 
 
+def test_run_once_dry_run_does_not_migrate_existing_old_schema_state(tmp_path):
+    config_path = _config(tmp_path)
+    state_path = tmp_path / "state.sqlite3"
+    with sqlite3.connect(state_path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE seen_items (
+                dedupe_key TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                link TEXT NOT NULL,
+                first_seen_at TEXT NOT NULL,
+                last_seen_at TEXT NOT NULL
+            )
+            """
+        )
+        before = _sqlite_schema_objects(connection)
+
+    result = run_once(
+        config_path,
+        dry_run=True,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
+            qbittorrent_factory=lambda _config: FakeQbittorrentClient(),
+        ),
+    )
+
+    assert len(result.candidates) == 1
+    with sqlite3.connect(state_path) as connection:
+        after = _sqlite_schema_objects(connection)
+    assert after == before == (("table", "seen_items"),)
+
+
 def test_retryable_qbittorrent_submit_failure_remains_eligible_until_success(tmp_path, monkeypatch):
     config_path = _config(tmp_path, organizer_mode="move")
     config = load_config(config_path)
@@ -218,6 +251,7 @@ def test_cli_commands_cover_validate_run_monitor_state_failures_and_retry(tmp_pa
     assert "planned webhook:" in output
     assert "event_type=download_planned" in output
     assert "event_type=download_completed" in output
+    assert '"archived_rules"' in output
     assert "retryable" in output
     assert "Job reset to pending" in output
 
@@ -629,6 +663,173 @@ def test_state_lists_processed_pending_failed_and_retryable_records(tmp_path):
     assert retry_failed_item(config_path, "job-failed").retried is True
 
 
+def test_list_state_includes_archived_subscription_rules(tmp_path):
+    config_path = _config(tmp_path)
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.archive_rule("example-show", bangumi_subject_id=12345, reason="bangumi_complete")
+
+    summary = list_state(config_path)
+
+    assert [rule["rule_name"] for rule in summary.archived_rules] == ["example-show"]
+
+
+def test_cli_state_json_includes_archived_subscription_rules(tmp_path, capsys):
+    config_path = _config(tmp_path)
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.archive_rule("example-show", bangumi_subject_id=12345, reason="bangumi_complete")
+
+    assert cli.main(["state", "--config", str(config_path)]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert [rule["rule_name"] for rule in output["archived_rules"]] == ["example-show"]
+
+
+def test_scheduler_tick_skips_archived_rules(tmp_path):
+    config_path = _config(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["bangumi_subject_id"] = 12345
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    fake_qbit = FakeQbittorrentClient()
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.archive_rule("example-show", bangumi_subject_id=12345, reason="bangumi_complete")
+
+    result = scheduler_tick(
+        config_path,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert result.candidates == ()
+    assert fake_qbit.submissions == []
+
+
+def test_run_once_dry_run_reads_archived_rules_from_uri_safe_state_path(tmp_path):
+    config_path = _config(tmp_path)
+    state_path = tmp_path / "state#archive?.sqlite3"
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["state"]["path"] = str(state_path)
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    fake_qbit = FakeQbittorrentClient()
+    with SubscriptionState(state_path) as state:
+        state.archive_rule("example-show", bangumi_subject_id=12345, reason="bangumi_complete")
+
+    result = run_once(
+        config_path,
+        dry_run=True,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert result.candidates == ()
+    assert fake_qbit.submissions == []
+
+
+def test_monitor_once_archives_rule_after_bangumi_main_episodes_are_completed_and_organized(tmp_path):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["bangumi_subject_id"] = 12345
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        for episode in (1, 2):
+            state.upsert_job(
+                f"job-{episode}",
+                dedupe_key=f"infohash:{episode}",
+                status=DownloadJobStatus.COMPLETED,
+                organizer_outcome="applied",
+                metadata={"rule_name": "example-show", "episode": episode},
+            )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(),
+        dry_run=False,
+        organize=False,
+        dependencies=WorkflowDependencies(bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(subject_id, 2, (1, 2))),
+    )
+
+    assert [event.event_type for event in result.events] == ["subscription_archived"]
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.is_rule_archived("example-show") is True
+
+
+@pytest.mark.parametrize("organizer_outcome", [None, "planned"])
+def test_monitor_once_does_not_archive_completed_rule_without_applied_organizer_outcome(tmp_path, organizer_outcome):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["bangumi_subject_id"] = 12345
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        for episode in (1, 2):
+            state.upsert_job(
+                f"job-{episode}",
+                dedupe_key=f"infohash:{episode}",
+                status=DownloadJobStatus.COMPLETED,
+                organizer_outcome=organizer_outcome,
+                metadata={"rule_name": "example-show", "episode": episode},
+            )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(),
+        dry_run=False,
+        organize=False,
+        dependencies=WorkflowDependencies(bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(subject_id, 2, (1, 2))),
+    )
+
+    assert all(event.event_type != "subscription_archived" for event in result.events)
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.is_rule_archived("example-show") is False
+
+
+def test_monitor_once_does_not_archive_when_bangumi_episode_list_is_incomplete(tmp_path):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["bangumi_subject_id"] = 12345
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-1",
+            dedupe_key="infohash:1",
+            status=DownloadJobStatus.COMPLETED,
+            organizer_outcome="applied",
+            metadata={"rule_name": "example-show", "episode": 1},
+        )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(),
+        dry_run=False,
+        organize=False,
+        dependencies=WorkflowDependencies(bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(subject_id, 2, (1,))),
+    )
+
+    assert all(event.event_type != "subscription_archived" for event in result.events)
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.is_rule_archived("example-show") is False
+
+
+def test_monitor_once_dry_run_does_not_persist_subscription_archival(tmp_path):
+    config_path = _config(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["bangumi_subject_id"] = 12345
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    result = monitor_once(
+        config_path,
+        snapshots=(),
+        dry_run=True,
+        organize=False,
+        dependencies=WorkflowDependencies(bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(subject_id, 1, (1,))),
+    )
+
+    assert result.events == ()
+    assert not (tmp_path / "state.sqlite3").exists()
+
+
 def test_register_tolerates_partial_hermes_contexts_and_exposes_tools():
     ctx = RecordingContext()
 
@@ -761,3 +962,8 @@ def _config(tmp_path, organizer_mode="dry-run"):
     path = tmp_path / f"config-{organizer_mode}.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
+
+
+def _sqlite_schema_objects(connection):
+    cursor = connection.execute("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")
+    return tuple((str(row[0]), str(row[1])) for row in cursor.fetchall())

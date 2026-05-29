@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+import json
 
 from hermes_dmhy_anime_subscription.config import ConfigError, load_config
 from hermes_dmhy_anime_subscription.models import OrganizerMode, RuleEpisodeMode
@@ -19,6 +20,7 @@ def test_valid_example_config_loads_with_safe_defaults():
     assert config.subscriptions.rules[0].resolutions == ("1080p",)
     assert config.subscriptions.rules[0].categories == ("動畫",)
     assert config.subscriptions.rules[0].episode_mode is RuleEpisodeMode.EPISODE
+    assert config.subscriptions.rules[0].bangumi_subject_id is None
     assert config.subscriptions.rules[0].allow_packs is False
     assert config.qbittorrent.endpoint == "http://127.0.0.1:8080"
     assert config.qbittorrent.category == "anime"
@@ -29,6 +31,17 @@ def test_valid_example_config_loads_with_safe_defaults():
     assert config.webhook.enabled is False
     assert config.webhook.url_env == "DMHY_WEBHOOK_URL"
     assert str(config.state.path).endswith("var/state/dmhy-subscription.sqlite3")
+
+
+def test_subscription_rule_accepts_optional_bangumi_subject_id(tmp_path):
+    raw = json.loads((FIXTURE_DIR / "valid.example.json").read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["bangumi_subject_id"] = 12345
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    config = load_config(path)
+
+    assert config.subscriptions.rules[0].bangumi_subject_id == 12345
 
 
 @pytest.mark.parametrize(
