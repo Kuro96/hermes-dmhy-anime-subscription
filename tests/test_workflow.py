@@ -173,10 +173,10 @@ def test_retryable_qbittorrent_submit_failure_remains_eligible_until_success(tmp
     assert job["status"] == DownloadJobStatus.SUBMITTED.value
 
 
-def test_run_once_apply_records_satisfied_season_pack_and_ignores_later_episode(tmp_path, monkeypatch):
+def test_run_once_apply_satisfied_pack_suppresses_later_episode_but_accepts_later_pack(tmp_path, monkeypatch):
     config_path = _config(tmp_path, organizer_mode="move")
     raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["subscriptions"]["rules"][0]["allow_packs"] = True
+    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
     raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
     config_path.write_text(json.dumps(raw), encoding="utf-8")
     monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
@@ -195,22 +195,38 @@ def test_run_once_apply_records_satisfied_season_pack_and_ignores_later_episode(
         ),
         qbittorrent_factory=lambda _config: fake_qbit,
     )
+    pack_v2_dependencies = WorkflowDependencies(
+        feed_fetcher=lambda _url: _season_pack_rss(
+            info_hash="4444444444444444444444444444444444444444",
+            guid="season-pack-200004",
+        ),
+        qbittorrent_factory=lambda _config: fake_qbit,
+    )
     result = run_once(config_path, dry_run=False, dependencies=pack_dependencies)
     later_episode = run_once(config_path, dry_run=False, dependencies=episode_dependencies)
+    later_pack = run_once(config_path, dry_run=False, dependencies=pack_v2_dependencies)
 
     assert result.parsed_items == 2
     assert len(result.candidates) == 1
     assert later_episode.parsed_items == 1
     assert len(later_episode.candidates) == 0
+    assert later_pack.parsed_items == 1
+    assert len(later_pack.candidates) == 1
     assert result.candidates[0].candidate.feed_item.is_season_pack is True
-    assert len(fake_qbit.submissions) == 1
+    assert later_pack.candidates[0].candidate.feed_item.is_season_pack is True
+    assert len(fake_qbit.submissions) == 2
     assert fake_qbit.submissions[0][0].title == "[ExampleSub] Example Anime 季度全集 [1080p]"
+    assert fake_qbit.submissions[1][0].title == "[ExampleSub] Example Anime 季度全集 [1080p]"
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         assert state.has_seen_item("infohash:2222222222222222222222222222222222222222")
         assert not state.has_seen_item("infohash:1111111111111111111111111111111111111111")
         assert not state.has_seen_item("infohash:3333333333333333333333333333333333333333")
+        assert state.has_seen_item("infohash:4444444444444444444444444444444444444444")
         assert state.list_satisfied_season_packs() == (("example-show", "example anime", 1),)
-        assert [job["torrent_hash"] for job in state.list_jobs()] == ["2222222222222222222222222222222222222222"]
+        assert {job["torrent_hash"] for job in state.list_jobs()} == {
+            "2222222222222222222222222222222222222222",
+            "4444444444444444444444444444444444444444",
+        }
 
 
 def test_run_once_dry_run_allowed_pack_does_not_satisfy_later_episode(tmp_path, monkeypatch):
@@ -911,6 +927,26 @@ def _episode_rss(*, episode, info_hash, guid):
       <category>動畫</category>
       <guid>{guid}</guid>
       <enclosure url="magnet:?xt=urn:btih:{info_hash}&amp;dn=Episode" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+"""
+
+
+def _season_pack_rss(*, info_hash, guid):
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Anime RSS</title>
+    <item>
+      <title>[ExampleSub] Example Anime 季度全集 [1080p]</title>
+      <link>https://share.dmhy.org/topics/view/200004_example_anime_batch.html?sort_id=31</link>
+      <pubDate>Mon, 25 May 2026 11:00:00 +0000</pubDate>
+      <description>Quarterly complete season pack</description>
+      <author>ExampleSub</author>
+      <category>季度全集</category>
+      <guid>{guid}</guid>
+      <enclosure url="magnet:?xt=urn:btih:{info_hash}&amp;dn=SeasonPack" type="application/x-bittorrent" />
     </item>
   </channel>
 </rss>
