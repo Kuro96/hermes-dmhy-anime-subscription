@@ -185,7 +185,13 @@ def run_once(
 
     archived_rule_names = _archived_rule_names(config)
     with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
-        satisfied_seasons = _satisfied_season_packs(config) if dry_run else set(state.list_satisfied_season_packs())
+        if dry_run:
+            satisfied_seasons = _satisfied_season_packs(config)
+        else:
+            satisfied_seasons = set(state.list_satisfied_season_packs()) | _active_satisfied_season_packs(
+                state,
+                config,
+            )
         matched: list[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule]] = []
         for decision in dedupe_items(tuple(items)):
             if not decision.accepted:
@@ -900,17 +906,10 @@ def _record_organizer_actions(state: SubscriptionState, result: OrganizerResult,
 def _record_completed_satisfied_season_packs(state: SubscriptionState, config: PluginConfig) -> None:
     pack_rule_names = {rule.name for rule in config.subscriptions.rules if _rule_allows_pack(rule)}
     for job in state.list_jobs(statuses=(DownloadJobStatus.COMPLETED.value,)):
-        metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
-        satisfaction = metadata.get("season_pack_satisfaction")
-        if not isinstance(satisfaction, dict):
+        satisfaction = _satisfied_season_pack_from_job(job, pack_rule_names)
+        if satisfaction is None:
             continue
-        rule_name = satisfaction.get("rule_name")
-        series_key = satisfaction.get("series_key")
-        season = _integral_episode(satisfaction.get("season"))
-        if not isinstance(rule_name, str) or rule_name not in pack_rule_names:
-            continue
-        if not isinstance(series_key, str) or season is None:
-            continue
+        rule_name, series_key, season = satisfaction
         state.record_satisfied_season_pack(
             rule_name,
             series_key,
@@ -918,6 +917,36 @@ def _record_completed_satisfied_season_packs(state: SubscriptionState, config: P
             job_id=str(job["job_id"]),
             dedupe_key=str(job["dedupe_key"]),
         )
+
+
+def _active_satisfied_season_packs(
+    state: SubscriptionState,
+    config: PluginConfig,
+) -> set[tuple[str, str, int]]:
+    pack_rule_names = {rule.name for rule in config.subscriptions.rules if _rule_allows_pack(rule)}
+    return {
+        satisfaction
+        for job in state.list_jobs(statuses=_PACK_SUPPRESSION_STATUSES)
+        if (satisfaction := _satisfied_season_pack_from_job(job, pack_rule_names)) is not None
+    }
+
+
+def _satisfied_season_pack_from_job(
+    job: dict[str, object],
+    pack_rule_names: set[str],
+) -> tuple[str, str, int] | None:
+    metadata = job.get("metadata") if isinstance(job.get("metadata"), dict) else {}
+    satisfaction = metadata.get("season_pack_satisfaction")
+    if not isinstance(satisfaction, dict):
+        return None
+    rule_name = satisfaction.get("rule_name")
+    series_key = satisfaction.get("series_key")
+    season = _integral_episode(satisfaction.get("season"))
+    if not isinstance(rule_name, str) or rule_name not in pack_rule_names:
+        return None
+    if not isinstance(series_key, str) or season is None:
+        return None
+    return rule_name, series_key, season
 
 
 _ACTIVE_STATUSES = (
@@ -928,6 +957,13 @@ _ACTIVE_STATUSES = (
     DownloadJobStatus.ERROR.value,
     DownloadJobStatus.MISSING.value,
     DownloadJobStatus.DELETED.value,
+)
+
+
+_PACK_SUPPRESSION_STATUSES = (
+    DownloadJobStatus.SUBMITTED.value,
+    DownloadJobStatus.QUEUED.value,
+    DownloadJobStatus.DOWNLOADING.value,
 )
 
 
