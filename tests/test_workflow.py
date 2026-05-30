@@ -595,6 +595,66 @@ def test_run_once_base_range_suppresses_same_base_range_episode_in_feed_and_afte
         assert not state.has_seen_item("infohash:7777777777777777777777777777777777777777")
 
 
+def test_run_once_completed_pack_with_embedded_episode_range_suppresses_later_episode(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    fake_qbit = FakeQbittorrentClient()
+    pack_title = "[Subs] Example Anime 01-12合集 [1080p]"
+
+    pack_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _season_pack_rss(
+                info_hash="1212121212121212121212121212121212121212",
+                guid="season-pack-range-01-12",
+                title=pack_title,
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+    monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash="1212121212121212121212121212121212121212",
+                name=pack_title,
+                state="uploading",
+                progress=1.0,
+            ),
+        ),
+        dry_run=False,
+        organize=False,
+    )
+    episode_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                episode="01",
+                info_hash="1313131313131313131313131313131313131313",
+                guid="episode-after-range-pack-01",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert len(pack_result.candidates) == 1
+    assert pack_result.candidates[0].candidate.feed_item.is_season_pack is True
+    assert episode_result.parsed_items == 1
+    assert episode_result.candidates == ()
+    assert len(fake_qbit.submissions) == 1
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.list_satisfied_season_packs() == (("example-show", "example anime", 1),)
+        assert state.has_seen_item("infohash:1212121212121212121212121212121212121212")
+        assert not state.has_seen_item("infohash:1313131313131313131313131313131313131313")
+
+
 def test_run_once_failed_pack_does_not_suppress_later_episode(tmp_path, monkeypatch):
     config_path = _config(tmp_path, organizer_mode="move")
     raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -695,6 +755,9 @@ def test_series_key_falls_back_to_bracketed_series_after_release_group():
     assert workflow._series_key("[ExampleSub] Example Anime 2 - 01 - 02 [1080p][CHS]") == "example anime 2"
     assert workflow._series_key("[ExampleSub] Example Anime S02 - 01 - 02 [1080p][CHS]") == "example anime"
     assert workflow._series_key("[ExampleSub] Example Anime Season 2 - 01 - 02 [1080p][CHS]") == "example anime"
+    assert workflow._series_key("[Subs] Example Anime 01-12 合集 [1080p]", strip_bare_numbers=False) == "example anime"
+    assert workflow._series_key("[Subs] Example Anime 01-12合集 [1080p]", strip_bare_numbers=False) == "example anime"
+    assert workflow._series_key("[Subs] Example Anime 2 合集 [1080p]", strip_bare_numbers=False) == "example anime 2"
     assert workflow._series_key("[Subs] 86 季度全集 [1080p]", strip_bare_numbers=False) == "86"
     assert workflow._series_key("[Subs] 86 - 01 [1080p]") == "86"
     assert workflow._series_key("[86] 季度全集 [1080p]", strip_bare_numbers=False) == "86"

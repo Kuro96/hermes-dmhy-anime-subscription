@@ -656,6 +656,8 @@ def _normalize_series_key(value: str, *, strip_bare_numbers: bool = True) -> str
     if strip_bare_numbers:
         value = re.sub(r"(?:^|[\s_\-.])\d{1,3}(?:v\d+)?(?:[\s_\-.]|$)(?!\s*[-–—]\s*\d{1,3}\b)", " ", value)
         value = re.sub(r"(?:\s*[-–—]\s*\d{1,3}(?:v\d+)?)*(?:\s*[-–—]\s*)\s*$", " ", value)
+    else:
+        value = re.sub(r"(?:^|[\s_\.])\d{1,3}(?:v\d+)?\s*[-–—]\s*\d{1,3}(?:v\d+)?(?=$|[\s_\.]|\s*(?:季度全集|全集|合集|season pack|batch|complete))", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\b(?:480|720|1080|2160)p\b|\b4k\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"季度全集|季度|全集|合集|season pack|batch|complete", " ", value, flags=re.IGNORECASE)
     return re.sub(r"[_\W]+", " ", value.casefold()).strip()
