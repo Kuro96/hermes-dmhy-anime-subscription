@@ -185,7 +185,7 @@ def run_once(
 
     archived_rule_names = _archived_rule_names(config)
     with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
-        satisfied_seasons = set(state.list_satisfied_season_packs())
+        satisfied_seasons = _satisfied_season_packs(config) if dry_run else set(state.list_satisfied_season_packs())
         matched: list[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule]] = []
         for decision in dedupe_items(tuple(items)):
             if not decision.accepted:
@@ -715,6 +715,20 @@ def _archived_rule_names(config: PluginConfig) -> frozenset[str]:
             return frozenset()
         cursor = connection.execute("SELECT rule_name FROM archived_rules")
         return frozenset(str(row[0]) for row in cursor.fetchall())
+
+
+def _satisfied_season_packs(config: PluginConfig) -> frozenset[tuple[str, str, int]]:
+    if not config.state.path.exists():
+        return frozenset()
+    uri = f"{config.state.path.resolve().as_uri()}?mode=ro"
+    with sqlite3.connect(uri, uri=True) as connection:
+        table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'satisfied_season_packs'"
+        ).fetchone()
+        if table is None:
+            return frozenset()
+        cursor = connection.execute("SELECT rule_name, series_key, season FROM satisfied_season_packs")
+        return frozenset((str(row[0]), str(row[1]), int(row[2])) for row in cursor.fetchall())
 
 
 def _completed_snapshots_from_run_result(run_result: RunOnceResult, source_path: str) -> tuple[TorrentSnapshot, ...]:

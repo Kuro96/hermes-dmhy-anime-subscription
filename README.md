@@ -154,9 +154,9 @@ Dry-run qBittorrent submission prints the planned payload, makes no HTTP calls, 
 
 ### `state`
 
-`path` is the SQLite file used for seen feed items, submitted jobs, retry records, failures, organizer outcomes, and archived subscription rules during apply and stateful monitor operations. Dry-run planning uses ephemeral in-memory state instead of this file.
+`path` is the SQLite file used for seen feed items, submitted jobs, retry records, failures, organizer outcomes, and archived subscription rules during apply and stateful monitor operations. Dry-run planning uses ephemeral in-memory state for any planned changes, while reading selected existing tables from this file in read-only mode for accurate previews.
 
-Dry-run `run-once` and `schedule-tick` do not initialize or migrate the configured SQLite file. If the file already has an `archived_rules` table, they read only that table to skip archived rules; a missing file or missing table is treated as no archived rules.
+Dry-run `run-once` and `schedule-tick` do not initialize or migrate the configured SQLite file. If the file already has `archived_rules` or `satisfied_season_packs` tables, they read those tables in read-only mode to skip archived rules and preserve completed-pack suppressions in previews; a missing file or missing table is treated as no archived rules or satisfied packs.
 
 Archived rules are created only by apply-mode monitoring after a rule with `bangumi_subject_id` has all Bangumi main episodes completed and organized. Once archived, the rule stays in state history and is skipped by future matching; the `state` command includes archived rules in its JSON output.
 

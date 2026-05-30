@@ -912,6 +912,44 @@ def test_run_once_dry_run_allowed_pack_does_not_satisfy_later_episode(tmp_path, 
         assert state.has_seen_item("infohash:3333333333333333333333333333333333333333")
 
 
+def test_run_once_dry_run_reads_satisfied_pack_suppression_without_mutating_state(tmp_path):
+    config_path = _config(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["allow_packs"] = True
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    state_path = tmp_path / "state.sqlite3"
+    fake_qbit = FakeQbittorrentClient()
+    with SubscriptionState(state_path) as state:
+        assert state.record_satisfied_season_pack(
+            "example-show",
+            "example anime",
+            1,
+            job_id="dmhy-season-pack",
+            dedupe_key="infohash:2222222222222222222222222222222222222222",
+        )
+        before = state.list_satisfied_season_packs()
+
+    result = run_once(
+        config_path,
+        dry_run=True,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                episode="03",
+                info_hash="5555555555555555555555555555555555555555",
+                guid="episode-200005",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert result.parsed_items == 1
+    assert result.candidates == ()
+    assert fake_qbit.submissions == []
+    with SubscriptionState(state_path) as state:
+        assert state.list_satisfied_season_packs() == before
+        assert not state.has_seen_item("infohash:5555555555555555555555555555555555555555")
+
+
 def test_run_once_episode_only_rule_keeps_episode_when_pack_is_present(tmp_path):
     config_path = _config(tmp_path)
     raw = json.loads(config_path.read_text(encoding="utf-8"))
