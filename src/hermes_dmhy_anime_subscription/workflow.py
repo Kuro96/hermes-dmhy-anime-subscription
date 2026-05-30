@@ -300,8 +300,8 @@ def production_tick(
     ensure_apply_safe(config, dry_run=dry_run)
     deps = dependencies or WorkflowDependencies()
     pre_active_job_ids = _active_job_ids(config)
-    run_result = run_once(config_path, dry_run=dry_run, dependencies=deps)
     if dry_run:
+        run_result = run_once(config_path, dry_run=True, dependencies=deps)
         return ProductionTickResult(dry_run=True, run_result=run_result)
 
     qbittorrent = deps.qbittorrent_factory(config) if deps.qbittorrent_factory else QbittorrentClient.from_config_env(config.qbittorrent)
@@ -310,11 +310,12 @@ def production_tick(
     except RuntimeError as exc:
         return ProductionTickResult(
             dry_run=False,
-            run_result=run_result,
+            run_result=RunOnceResult(dry_run=False, parsed_items=0, parse_errors=0, candidates=(), events=()),
             qbit_failure={"stage": "list_torrents", "message": str(exc), "retryable": True},
         )
     snapshots = snapshots_from_qbittorrent_torrents(config, torrents, job_ids=pre_active_job_ids)
     monitor_result = monitor_once(config_path, snapshots=snapshots, dry_run=False, organize=True, dependencies=deps, expected_job_ids=pre_active_job_ids)
+    run_result = run_once(config_path, dry_run=False, dependencies=deps)
     return ProductionTickResult(
         dry_run=False,
         run_result=run_result,
@@ -605,20 +606,27 @@ def _season_pack_satisfaction_metadata(candidate: ReleaseCandidate, rule: Subscr
 
 
 def _series_key(title: str, *, strip_bare_numbers: bool = True) -> str:
-    value = _strip_leading_release_group(title)
+    value = _strip_leading_release_group(title, strip_bare_numbers=strip_bare_numbers)
     value = re.sub(r"\[([^\]]*)\]", _series_key_bracket_replacement, value)
     value = re.sub(r"\([^\)]*\)", " ", value)
-    return _normalize_series_key(value, strip_bare_numbers=strip_bare_numbers)
+    key = _normalize_series_key(value, strip_bare_numbers=strip_bare_numbers)
+    if key:
+        return key
+    match = re.match(r"^\s*\[(\d{1,3}(?:v\d+)?)\](.*)", title, flags=re.IGNORECASE)
+    has_episode_delimiter = match and re.match(r"\s*[-–—]\s*\d{1,3}(?:v\d+)?\b", match.group(2), flags=re.IGNORECASE)
+    if match and (not strip_bare_numbers or has_episode_delimiter):
+        return _normalize_series_key(match.group(1), strip_bare_numbers=False)
+    return key
 
 
-def _strip_leading_release_group(title: str) -> str:
+def _strip_leading_release_group(title: str, *, strip_bare_numbers: bool = True) -> str:
     match = re.match(r"^\s*\[[^\]]+\]\s*", title)
     if not match:
         return title
     remainder = title[match.end():]
     remainder = re.sub(r"\[([^\]]*)\]", _series_key_bracket_replacement, remainder)
     remainder = re.sub(r"\([^\)]*\)", " ", remainder)
-    if _normalize_series_key(remainder):
+    if _normalize_series_key(remainder, strip_bare_numbers=strip_bare_numbers):
         return title[match.end():]
     return title
 

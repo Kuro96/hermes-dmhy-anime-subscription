@@ -352,6 +352,130 @@ def test_run_once_completed_numbered_sequel_pack_does_not_suppress_base_series_e
         assert state.has_seen_item("infohash:7777777777777777777777777777777777777777")
 
 
+def test_run_once_completed_numeric_series_pack_suppresses_later_episode(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["include_keywords"] = ["86", "1080p"]
+    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    fake_qbit = FakeQbittorrentClient()
+    pack_title = "[Subs] 86 季度全集 [1080p]"
+
+    pack_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _season_pack_rss(
+                info_hash="8686868686868686868686868686868686868686",
+                guid="season-pack-86",
+                title=pack_title,
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+    monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash="8686868686868686868686868686868686868686",
+                name=pack_title,
+                state="uploading",
+                progress=1.0,
+            ),
+        ),
+        dry_run=False,
+        organize=False,
+    )
+    episode_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                episode="01",
+                info_hash="8787878787878787878787878787878787878787",
+                guid="episode-86-01",
+                title="[Subs] 86 - {episode} [1080p]",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert len(pack_result.candidates) == 1
+    assert pack_result.candidates[0].candidate.feed_item.is_season_pack is True
+    assert episode_result.parsed_items == 1
+    assert episode_result.candidates == ()
+    assert len(fake_qbit.submissions) == 1
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.list_satisfied_season_packs() == (("example-show", "86", 1),)
+        assert state.has_seen_item("infohash:8686868686868686868686868686868686868686")
+        assert not state.has_seen_item("infohash:8787878787878787878787878787878787878787")
+
+
+def test_run_once_completed_bracketed_numeric_series_pack_suppresses_later_episode(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["include_keywords"] = ["86", "1080p"]
+    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    fake_qbit = FakeQbittorrentClient()
+    pack_title = "[86] 季度全集 [1080p]"
+
+    pack_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _season_pack_rss(
+                info_hash="8989898989898989898989898989898989898989",
+                guid="season-pack-bracketed-86",
+                title=pack_title,
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+    monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash="8989898989898989898989898989898989898989",
+                name=pack_title,
+                state="uploading",
+                progress=1.0,
+            ),
+        ),
+        dry_run=False,
+        organize=False,
+    )
+    episode_result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                episode="01",
+                info_hash="9090909090909090909090909090909090909090",
+                guid="episode-bracketed-86-01",
+                title="[86] - {episode} [1080p]",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert len(pack_result.candidates) == 1
+    assert pack_result.candidates[0].candidate.feed_item.is_season_pack is True
+    assert episode_result.parsed_items == 1
+    assert episode_result.candidates == ()
+    assert len(fake_qbit.submissions) == 1
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.list_satisfied_season_packs() == (("example-show", "86", 1),)
+        assert state.has_seen_item("infohash:8989898989898989898989898989898989898989")
+        assert not state.has_seen_item("infohash:9090909090909090909090909090909090909090")
+
+
 def test_run_once_numbered_sequel_range_suppresses_same_numbered_sequel_episode_in_feed_and_after_completion(tmp_path, monkeypatch):
     config_path = _config(tmp_path, organizer_mode="move")
     raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -571,6 +695,11 @@ def test_series_key_falls_back_to_bracketed_series_after_release_group():
     assert workflow._series_key("[ExampleSub] Example Anime 2 - 01 - 02 [1080p][CHS]") == "example anime 2"
     assert workflow._series_key("[ExampleSub] Example Anime S02 - 01 - 02 [1080p][CHS]") == "example anime"
     assert workflow._series_key("[ExampleSub] Example Anime Season 2 - 01 - 02 [1080p][CHS]") == "example anime"
+    assert workflow._series_key("[Subs] 86 季度全集 [1080p]", strip_bare_numbers=False) == "86"
+    assert workflow._series_key("[Subs] 86 - 01 [1080p]") == "86"
+    assert workflow._series_key("[86] 季度全集 [1080p]", strip_bare_numbers=False) == "86"
+    assert workflow._series_key("[86] - 01 [1080p]") == "86"
+    assert workflow._series_key("[01][1080p]") == ""
 
 
 @pytest.mark.parametrize("episode_marker", ["第01話", "第01话", "第01集"])
@@ -960,6 +1089,68 @@ def test_production_tick_apply_does_not_mark_new_submissions_missing_in_same_tic
     assert job is not None
     assert job["status"] == DownloadJobStatus.SUBMITTED.value
     assert job["retry_count"] == 0
+
+
+def test_production_tick_apply_refreshes_completed_pack_state_before_rss_polling(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
+    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    pack_hash = "2222222222222222222222222222222222222222"
+    episode_hash = "3333333333333333333333333333333333333333"
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "dmhy-pack",
+            dedupe_key=f"infohash:{pack_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=pack_hash,
+            metadata={
+                "title": "[ExampleSub] Example Anime 季度全集 [1080p]",
+                "rule_name": "example-show",
+                "season_pack_satisfaction": {"rule_name": "example-show", "series_key": "example anime", "season": 1},
+                "qbittorrent_category": "anime",
+            },
+        )
+    qbit = FakeProductionQbittorrentClient(
+        (
+            QbittorrentTorrent(
+                torrent_hash=pack_hash,
+                name="[ExampleSub] Example Anime 季度全集 [1080p]",
+                state="uploading",
+                progress=1.0,
+                save_path=str(tmp_path / "downloads"),
+                content_path=None,
+                completion_on=1,
+            ),
+        )
+    )
+
+    result = production_tick(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                episode="02",
+                info_hash=episode_hash,
+                guid="episode-200003",
+            ),
+            qbittorrent_factory=lambda _config: qbit,
+        ),
+    )
+
+    assert result.dry_run is False
+    assert result.run_result.parsed_items == 1
+    assert result.run_result.candidates == ()
+    assert result.torrent_count == 1
+    assert len(result.snapshots) == 1
+    assert result.monitor_result is not None
+    assert len(qbit.submissions) == 0
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.list_satisfied_season_packs() == (("example-show", "example anime", 1),)
+        assert not state.has_seen_item(f"infohash:{episode_hash}")
 
 
 
