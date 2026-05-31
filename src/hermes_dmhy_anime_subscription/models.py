@@ -122,7 +122,7 @@ class DownloadJob:
 
 @dataclass(frozen=True, slots=True)
 class LibraryMovePlan:
-    """Planned organizer action without performing file moves."""
+    """Planned organizer action without performing file copies."""
 
     source_path: str
     destination_path: str

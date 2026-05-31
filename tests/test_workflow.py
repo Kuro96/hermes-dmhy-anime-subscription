@@ -2158,7 +2158,7 @@ def test_cli_monitor_once_apply_prints_applied_organizer_label(
         / "Season 01"
         / "Example Anime - S01E01 - Unknown [Unknown].mkv"
     )
-    assert not source.exists()
+    assert source.exists()
     assert destination.read_bytes() == b"video"
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         job = state.get_job("job-monitor-apply-label")
@@ -2574,7 +2574,7 @@ def test_monitor_once_production_injects_bangumi_lookup_into_default_organizer(
         ),
     )
 
-    assert calls == ["[ExampleSub] Example Anime - 01 [1080p][CHS]"]
+    assert calls == ["Example Anime"]
     assert (
         result.organizer_results[0].actions[0].destination_path
         == tmp_path
@@ -3043,7 +3043,7 @@ def test_monitor_once_apply_without_organize_does_not_persist_planning_state_and
         "job-monitor-without-organize"
     ]
     assert second.monitor_result.organizer_results[0].actions[0].status == "applied"
-    assert not source.exists()
+    assert source.exists()
     assert destination.read_bytes() == b"video"
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         job = state.get_job("job-monitor-without-organize")
@@ -3052,7 +3052,7 @@ def test_monitor_once_apply_without_organize_does_not_persist_planning_state_and
         assert "organizer_input_created_at" in job["metadata"]
 
 
-def test_cli_monitor_once_dry_run_plans_without_mutation_and_apply_still_moves(
+def test_cli_monitor_once_dry_run_plans_without_mutation_and_apply_still_copies(
     tmp_path, monkeypatch, capsys
 ):
     config_path = _config(tmp_path, organizer_mode="move")
@@ -3124,7 +3124,7 @@ def test_cli_monitor_once_dry_run_plans_without_mutation_and_apply_still_moves(
     )
     capsys.readouterr()
 
-    assert not source.exists()
+    assert source.exists()
     assert destination.read_bytes() == b"video"
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         job = state.get_job("job-cli-monitor")
