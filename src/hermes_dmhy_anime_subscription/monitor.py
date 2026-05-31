@@ -58,6 +58,7 @@ def monitor_downloads(
     *,
     expected_job_ids: Iterable[str] = (),
     now: datetime | None = None,
+    plan_organizer: bool = True,
 ) -> MonitorResult:
     """Update durable job state from supplied torrent snapshots."""
 
@@ -73,7 +74,9 @@ def monitor_downloads(
         if job is None:
             continue
         seen_job_ids.add(job["job_id"])
-        outcome = _process_snapshot(state, job, snapshot, retry, observed_at)
+        outcome = _process_snapshot(
+            state, job, snapshot, retry, observed_at, plan_organizer=plan_organizer
+        )
         updated.append(job["job_id"])
         organizer_inputs.extend(outcome.organizer_inputs)
         events.extend(outcome.events)
@@ -91,7 +94,9 @@ def monitor_downloads(
             state="missing",
             error="Torrent was not present in the supplied snapshot list",
         )
-        outcome = _process_snapshot(state, job, snapshot, retry, observed_at)
+        outcome = _process_snapshot(
+            state, job, snapshot, retry, observed_at, plan_organizer=plan_organizer
+        )
         updated.append(job_id)
         events.extend(outcome.events)
         failures.extend(outcome.failures)
@@ -117,10 +122,14 @@ def _process_snapshot(
     snapshot: TorrentSnapshot,
     retry: RetryConfig,
     observed_at: datetime,
+    *,
+    plan_organizer: bool,
 ) -> _SnapshotOutcome:
     family = torrent_state_family(snapshot.state, snapshot.progress)
     if family == DownloadJobStatus.COMPLETED:
-        return _mark_completed(state, job, snapshot, observed_at)
+        return _mark_completed(
+            state, job, snapshot, observed_at, plan_organizer=plan_organizer
+        )
     if family in {DownloadJobStatus.ERROR, DownloadJobStatus.MISSING, DownloadJobStatus.DELETED, DownloadJobStatus.STALLED}:
         return _record_retryable_state(state, job, snapshot, family, retry, observed_at)
     return _mark_active(state, job, snapshot, family, observed_at)
@@ -171,6 +180,8 @@ def _mark_completed(
     job: dict[str, Any],
     snapshot: TorrentSnapshot,
     observed_at: datetime,
+    *,
+    plan_organizer: bool,
 ) -> _SnapshotOutcome:
     metadata = _snapshot_metadata(job, snapshot, observed_at, DownloadJobStatus.COMPLETED)
     metadata.pop("next_retry_at", None)
@@ -194,6 +205,24 @@ def _mark_completed(
             job["job_id"],
             dedupe_key=job["dedupe_key"],
             status=DownloadJobStatus.COMPLETED,
+            torrent_hash=snapshot.torrent_hash,
+            retry_count=int(job["retry_count"]),
+            last_error=None,
+            organizer_outcome=job["organizer_outcome"],
+            metadata=metadata,
+        )
+        events = (
+            ()
+            if job["status"] == DownloadJobStatus.COMPLETED.value
+            else (_event("download_completed", job, snapshot, "completed", observed_at),)
+        )
+        return _SnapshotOutcome(events=events)
+
+    if not plan_organizer:
+        state.upsert_job(
+            job["job_id"],
+            dedupe_key=job["dedupe_key"],
+            status=str(job["status"]),
             torrent_hash=snapshot.torrent_hash,
             retry_count=int(job["retry_count"]),
             last_error=None,
