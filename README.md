@@ -50,7 +50,7 @@ planned organizer: ... status=planned ... destination=...
 planned webhook: ... event_type=download_completed
 ```
 
-When you are ready to use live services, set qBittorrent credential environment variables, keep webhook URLs in environment variables, change `organizer.mode` only after testing paths, then run `run-once --apply`. Apply mode is blocked unless qBittorrent credential env names and values are present and organizer mode is `apply` or `move`.
+When you are ready to use live services, set qBittorrent credential environment variables, keep webhook URLs in environment variables, change `organizer.mode` only after testing paths, then run apply commands such as `run-once --apply` or `monitor-once --apply`. Apply mode with organization enabled is blocked unless qBittorrent credential env names and values are present and organizer mode is `apply` or `move`.
 
 ## Commands
 
@@ -62,7 +62,8 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscriptio
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli run-once --config config.json --dry-run --feed-file fixtures/dmhy/rss-anime.xml
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli run-once --config config.json --dry-run --feed-file fixtures/dmhy/rss-anime.xml --completed-source-path /sandbox/downloads/Example.mkv
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli run-once --config config.json --apply
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli monitor-once --config config.json --snapshot-json snapshots.json
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli monitor-once --config config.json --snapshot-json snapshots.json --dry-run
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli monitor-once --config config.json --snapshot-json snapshots.json --apply
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli organize-once --config config.json --job-id job-1 --torrent-hash HASH --title "Example - 01" --source-path /sandbox/download.mkv
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli state --config config.json
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli failures --config config.json
@@ -77,7 +78,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscriptio
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli schedule-tick --config /path/to/config.json --apply
 ```
 
-`--apply` performs the complete production tick: submit new matched RSS items to qBittorrent, list qBittorrent torrents for the configured category, match active jobs to torrent state (including base32 RSS infohash to qBittorrent hex hash conversion), monitor completed downloads, and run the organizer according to config. It prints a JSON summary suitable for scheduler logs. Apply mode is still guarded by `ensure_apply_safe`: qBittorrent credential env var names and values must exist, webhook URL env values must exist when enabled, and `organizer.mode` must be `apply` or `move`.
+`--apply` performs the complete production tick: list all qBittorrent torrents so pre-existing active jobs are not missed after category changes, match those pre-existing active jobs to torrent state (including base32 RSS infohash to qBittorrent hex hash conversion), monitor completed downloads and run the organizer according to config, then submit newly matched RSS items to qBittorrent. It prints a JSON summary suitable for scheduler logs. Apply mode is still guarded by `ensure_apply_safe`: qBittorrent credential env var names and values must exist, webhook URL env values must exist when enabled, and `organizer.mode` must be `apply` or `move`.
 
 The plugin does not install a service or cron job; use your own scheduler to call the bounded command at the configured interval.
 
@@ -154,9 +155,9 @@ Dry-run qBittorrent submission prints the planned payload, makes no HTTP calls, 
 
 ### `state`
 
-`path` is the SQLite file used for seen feed items, submitted jobs, retry records, failures, organizer outcomes, and archived subscription rules during apply and stateful monitor operations. Dry-run planning uses ephemeral in-memory state instead of this file.
+`path` is the SQLite file used for seen feed items, submitted jobs, retry records, failures, organizer outcomes, and archived subscription rules during apply and stateful monitor operations. Dry-run planning uses ephemeral in-memory state for any planned changes, while reading selected existing tables from this file in read-only mode for accurate previews.
 
-Dry-run `run-once` and `schedule-tick` do not initialize or migrate the configured SQLite file. If the file already has an `archived_rules` table, they read only that table to skip archived rules; a missing file or missing table is treated as no archived rules.
+Dry-run `run-once` and `schedule-tick` do not initialize or migrate the configured SQLite file. If the file already has `archived_rules` or `satisfied_season_packs` tables, they read those tables in read-only mode to skip archived rules and preserve completed-pack suppressions in previews; a missing file or missing table is treated as no archived rules or satisfied packs.
 
 Archived rules are created only by apply-mode monitoring after a rule with `bangumi_subject_id` has all Bangumi main episodes completed and organized. Once archived, the rule stays in state history and is skipped by future matching; the `state` command includes archived rules in its JSON output.
 
