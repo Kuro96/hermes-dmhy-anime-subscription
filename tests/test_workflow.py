@@ -155,6 +155,40 @@ def test_run_once_dry_run_is_repeatable_and_does_not_create_state(tmp_path):
     assert not state_path.exists()
 
 
+def test_run_once_does_not_mark_unmatched_global_feed_item_seen_before_specialized_feed(
+    tmp_path, monkeypatch
+):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["dmhy"]["feeds"] = [
+        {"name": "dmhy-main", "url": "https://example.invalid/main.xml"},
+        {"name": "tongari-special", "url": "https://example.invalid/tongari.xml"},
+    ]
+    raw["subscriptions"]["rules"][0]["feed_names"] = ["tongari-special"]
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    fake_qbit = FakeQbittorrentClient()
+
+    result = run_once(
+        config_path,
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _episode_rss(
+                episode="08",
+                info_hash="8888888888888888888888888888888888888888",
+                guid="tongari-08",
+            ),
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert len(result.candidates) == 1
+    assert len(fake_qbit.submissions) == 1
+    assert fake_qbit.submissions[0][0].feed_item.source_feed == "tongari-special"
+    assert result.candidates[0].status == DownloadJobStatus.SUBMITTED.value
+
+
 def test_run_once_dry_run_does_not_migrate_existing_old_schema_state(tmp_path):
     config_path = _config(tmp_path)
     state_path = tmp_path / "state.sqlite3"
