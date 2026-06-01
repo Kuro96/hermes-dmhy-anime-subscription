@@ -32,7 +32,7 @@ from .models import (
 from .monitor import OrganizerInput, TorrentSnapshot, monitor_downloads
 from .organizer import OrganizerResult, organize_media
 from .qbittorrent import QbittorrentClient, QbittorrentSubmitResult, QbittorrentTorrent
-from .rules import DedupeDecision, dedupe_items, match_rules
+from .rules import DedupeDecision, match_rules
 from .state import SubscriptionState
 from .webhook import (
     WebhookDeliveryPlan,
@@ -241,21 +241,19 @@ def run_once(
             config,
         )
         matched: list[tuple[DedupeDecision, ReleaseCandidate, SubscriptionRule]] = []
-        for decision in dedupe_items(tuple(items)):
-            if not decision.accepted:
+        matched_dedupe_keys: set[str] = set()
+        for item in tuple(items):
+            dedupe_key = item.dedupe_key
+            if dedupe_key in matched_dedupe_keys:
                 continue
-            if state.has_seen_item(decision.dedupe_key):
+            if state.has_seen_item(dedupe_key):
                 continue
             candidate, rule = _first_candidate(
-                decision.item,
+                item,
                 config.subscriptions.rules,
                 archived_rule_names=archived_rule_names,
             )
-            if candidate is None:
-                if not dry_run:
-                    state.record_seen_item(decision.item)
-                continue
-            if rule is None:
+            if candidate is None or rule is None:
                 continue
             if (
                 not candidate.feed_item.is_season_pack
@@ -263,7 +261,14 @@ def run_once(
                 and _season_pack_satisfaction_key(candidate) in satisfied_seasons
             ):
                 continue
+            decision = DedupeDecision(
+                item=item,
+                accepted=True,
+                dedupe_key=dedupe_key,
+                reason="first_matched",
+            )
             matched.append((decision, candidate, rule))
+            matched_dedupe_keys.add(dedupe_key)
 
         def submit_match(
             decision: DedupeDecision,
