@@ -231,11 +231,39 @@ def _lookup_title(title: str, stem: str, series_title: str) -> str:
 def _primary_title_alias(value: str) -> str:
     """Return the cleanest non-season title alias for external metadata lookup."""
 
-    for part in re.split(r"\s*/\s*", value):
-        cleaned = part.strip()
-        if cleaned:
-            return cleaned
+    for match in re.finditer(r"/", value):
+        left_script = _nearest_title_script(value, match.start() - 1, -1)
+        right_script = _nearest_title_script(value, match.end(), 1)
+        if {left_script, right_script} == {"latin", "cjk"}:
+            return value[: match.start()].strip()
     return value.strip()
+
+
+def _nearest_title_script(value: str, index: int, step: int) -> str:
+    while 0 <= index < len(value):
+        character = value[index]
+        if character == "/":
+            return ""
+        if _is_latin(character):
+            return "latin"
+        if _is_cjk(character):
+            return "cjk"
+        index += step
+    return ""
+
+
+def _is_latin(value: str) -> bool:
+    return ("A" <= value <= "Z") or ("a" <= value <= "z")
+
+
+def _is_cjk(value: str) -> bool:
+    codepoint = ord(value)
+    return (
+        0x3400 <= codepoint <= 0x9FFF
+        or 0xF900 <= codepoint <= 0xFAFF
+        or 0x3040 <= codepoint <= 0x30FF
+        or 0xAC00 <= codepoint <= 0xD7AF
+    )
 
 
 def _has_season_context(value: str) -> bool:

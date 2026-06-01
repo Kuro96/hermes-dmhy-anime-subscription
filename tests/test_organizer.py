@@ -187,6 +187,22 @@ def test_bangumi_lookup_uses_primary_alias_for_slash_separated_release_titles(
     assert result.actions[0].destination_path == library / "尖帽子的魔法工房" / "Tongari Boushi no Atelier 尖帽子的魔法工房 - S01E08 - DMG&SumiSora&LoliHouse [1080p].mkv"
 
 
+def test_bangumi_lookup_preserves_canonical_slash_title_for_lookup(tmp_path):
+    source = tmp_path / "downloads" / "[Subs] Fate stay night - 01 [1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+    calls = []
+
+    organize_media(
+        _organizer_input(source, title="[Subs] Fate/stay night - 01 [1080p]"),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+        bangumi_lookup=lambda title: calls.append(title) or None,
+    )
+
+    assert calls == ["Fate/stay night"]
+
+
 def test_unparsed_episode_falls_back_to_unsorted_with_warning_event(tmp_path):
     source = tmp_path / "downloads" / "[Subs] Example OVA [1080p].mkv"
     source.parent.mkdir()
