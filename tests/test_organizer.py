@@ -26,21 +26,21 @@ def test_dry_run_plans_media_server_layout_without_mutating_source(tmp_path):
     assert not destination.exists()
 
 
-def test_apply_moves_single_file_under_library_root(tmp_path):
+def test_apply_copies_single_file_under_library_root(tmp_path):
     source = tmp_path / "downloads" / "[Subs] Example Show - 02 [720p].mp4"
     source.parent.mkdir()
     source.write_bytes(b"video")
-    library = tmp_path / "library"
 
+    library = tmp_path / "library"
     result = organize_media(
         _organizer_input(source, title="[Subs] Example Show - 02 [720p]"),
-        OrganizerConfig(mode=OrganizerMode.MOVE, library_root=library, staging_root=tmp_path / "staging"),
+        OrganizerConfig(mode=OrganizerMode.APPLY, library_root=library, staging_root=tmp_path / "staging"),
     )
 
     destination = library / "Example Show" / "Season 01" / "Example Show - S01E02 - Subs [720p].mp4"
     assert result.actions[0].status == "applied"
     assert destination.read_bytes() == b"video"
-    assert not source.exists()
+    assert source.read_bytes() == b"video"
 
 
 def test_path_traversal_title_is_sanitized_inside_library_root(tmp_path):
@@ -160,6 +160,26 @@ def test_bangumi_lookup_uses_season_aware_release_title_for_s02(tmp_path):
 
     assert calls == ["[Subs] Example Show S02E03 [1080p]"]
     assert result.actions[0].destination_path == library / "示例 第二季" / "Example Show - S02E03 - Subs [1080p].mkv"
+
+
+def test_bangumi_lookup_uses_primary_alias_for_slash_separated_release_titles(tmp_path):
+    source = tmp_path / "downloads" / "[DMG&SumiSora&LoliHouse] Tongari Boushi no Atelier - 08 [WebRip 1080p HEVC-10bit AAC ASSx2].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+    calls = []
+
+    result = organize_media(
+        _organizer_input(
+            source,
+            title="[DMG&SumiSora&LoliHouse] Tongari Boushi no Atelier / 尖帽子的魔法工房 - 08 [WebRip 1080p HEVC-10bit AAC ASSx2]",
+        ),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+        bangumi_lookup=lambda title: calls.append(title) or "尖帽子的魔法工房",
+    )
+
+    assert calls == ["Tongari Boushi no Atelier"]
+    assert result.actions[0].destination_path == library / "尖帽子的魔法工房" / "Tongari Boushi no Atelier 尖帽子的魔法工房 - S01E08 - DMG&SumiSora&LoliHouse [1080p].mkv"
 
 
 def test_unparsed_episode_falls_back_to_unsorted_with_warning_event(tmp_path):

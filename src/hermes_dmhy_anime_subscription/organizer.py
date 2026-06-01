@@ -59,7 +59,7 @@ class _EpisodeInfo:
 
 
 def organize_media(organizer_input: OrganizerInput, config: OrganizerConfig, *, bangumi_lookup: BangumiLookup | None = None) -> OrganizerResult:
-    """Plan or apply safe moves into a Jellyfin/Plex/Emby-compatible layout."""
+    """Plan or apply safe copies into a Jellyfin/Plex/Emby-compatible layout."""
 
     source_root = Path(organizer_input.source_path)
     library_root = config.library_root.resolve(strict=False)
@@ -225,7 +225,17 @@ def _lookup_title(title: str, stem: str, series_title: str) -> str:
         value = value.strip()
         if value and _has_season_context(value):
             return value
-    return title.strip() or stem.strip() or series_title
+    return _primary_title_alias(series_title) or series_title.strip() or title.strip() or stem.strip()
+
+
+def _primary_title_alias(value: str) -> str:
+    """Return the cleanest non-season title alias for external metadata lookup."""
+
+    for part in re.split(r"\s+/\s+", value):
+        cleaned = part.strip()
+        if cleaned:
+            return cleaned
+    return value.strip()
 
 
 def _has_season_context(value: str) -> bool:
@@ -278,7 +288,7 @@ def _apply_action(action: OrganizerAction) -> OrganizerAction:
     if action.destination_path is None:
         return action
     action.destination_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(action.source_path), str(action.destination_path))
+    shutil.copy2(action.source_path, action.destination_path)
     return OrganizerAction(
         source_path=action.source_path,
         destination_path=action.destination_path,

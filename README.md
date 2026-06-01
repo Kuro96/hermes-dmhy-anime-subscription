@@ -2,7 +2,7 @@
 
 Hermes directory plugin for DMHY public RSS subscriptions. It reads fixture or public RSS feeds, matches releases against subscription rules, plans or submits qBittorrent jobs, tracks state in SQLite, plans safe media organization, and can emit webhook events.
 
-The safe path is dry-run first. Dry-run qBittorrent, organizer, and webhook work is planner-only and does not call live services, move files, or write configured SQLite state.
+The safe path is dry-run first. Dry-run qBittorrent, organizer, and webhook work is planner-only and does not call live services, copy files, or write configured SQLite state.
 
 ## Scope Boundaries
 
@@ -163,7 +163,7 @@ Archived rules are created only by apply-mode monitoring after a rule with `bang
 
 ### `organizer`
 
-`mode` is `dry-run`, `apply`, or `move`. CLI dry-runs force planning even if the config says `move`.
+`mode` is `dry-run`, `apply`, or the legacy alias `move`. CLI dry-runs force planning even if the config says `apply` or `move`; production organizer runs copy completed media into `library_root` and leave the qBittorrent source files in place for seeding and rechecks.
 
 `library_root` is the media library destination root. It is required for `apply` and `move` modes.
 
