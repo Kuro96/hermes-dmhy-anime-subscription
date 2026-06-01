@@ -231,7 +231,7 @@ def _lookup_title(title: str, stem: str, series_title: str) -> str:
 def _primary_title_alias(value: str) -> str:
     """Return the cleanest non-season title alias for external metadata lookup."""
 
-    for part in re.split(r"\s+/\s+", value):
+    for part in re.split(r"\s*/\s*", value):
         cleaned = part.strip()
         if cleaned:
             return cleaned

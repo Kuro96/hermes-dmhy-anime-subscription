@@ -255,6 +255,7 @@ def run_once(
             )
             if candidate is None or rule is None:
                 continue
+            matched_dedupe_keys.add(dedupe_key)
             if (
                 not candidate.feed_item.is_season_pack
                 and _rule_allows_pack(rule)
@@ -268,7 +269,6 @@ def run_once(
                 reason="first_matched",
             )
             matched.append((decision, candidate, rule))
-            matched_dedupe_keys.add(dedupe_key)
 
         def submit_match(
             decision: DedupeDecision,

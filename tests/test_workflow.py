@@ -1080,6 +1080,44 @@ def test_run_once_dry_run_active_pack_suppresses_later_episode_without_mutating_
         assert not state.has_seen_item(f"infohash:{episode_hash}")
 
 
+def test_run_once_pack_suppressed_match_dedupes_later_same_infohash_item(
+    tmp_path,
+):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    first_rule = raw["subscriptions"]["rules"][0]
+    first_rule["episode_mode"] = "both"
+    second_rule = dict(first_rule)
+    second_rule["name"] = "other-show"
+    second_rule["include_keywords"] = ["Other Anime", "1080p"]
+    second_rule["episode_mode"] = "episode"
+    raw["subscriptions"]["rules"].append(second_rule)
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    duplicate_hash = "3333333333333333333333333333333333333333"
+
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.record_satisfied_season_pack(
+            "example-show",
+            "example anime",
+            1,
+            job_id="job-completed-pack",
+            dedupe_key="infohash:2222222222222222222222222222222222222222",
+        )
+
+    result = run_once(
+        config_path,
+        dry_run=True,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: _same_infohash_pack_suppressed_then_other_rss(
+                duplicate_hash
+            ),
+        ),
+    )
+
+    assert result.parsed_items == 2
+    assert result.candidates == ()
+
+
 def test_run_once_completed_numbered_sequel_pack_does_not_suppress_base_series_episode(
     tmp_path, monkeypatch
 ):
@@ -3927,6 +3965,36 @@ def _numbered_sequel_episode_and_pack_rss(
   </channel>
 </rss>
 """.format(episode_title=episode_title, pack_title=pack_title)
+
+
+def _same_infohash_pack_suppressed_then_other_rss(info_hash):
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Anime RSS</title>
+    <item>
+      <title>[ExampleSub] Example Anime - 02 [1080p][CHS]</title>
+      <link>https://share.dmhy.org/topics/view/200051_example_anime_02.html</link>
+      <pubDate>Mon, 25 May 2026 10:30:00 +0000</pubDate>
+      <description>Example release description</description>
+      <author>ExampleSub</author>
+      <category>動畫</category>
+      <guid>episode-200051</guid>
+      <enclosure url="magnet:?xt=urn:btih:{info_hash}&amp;dn=ExampleEpisode" type="application/x-bittorrent" />
+    </item>
+    <item>
+      <title>[ExampleSub] Other Anime - 01 [1080p][CHS]</title>
+      <link>https://share.dmhy.org/topics/view/200052_other_anime_01.html</link>
+      <pubDate>Mon, 25 May 2026 10:35:00 +0000</pubDate>
+      <description>Other release description</description>
+      <author>ExampleSub</author>
+      <category>動畫</category>
+      <guid>episode-200052</guid>
+      <enclosure url="magnet:?xt=urn:btih:{info_hash}&amp;dn=OtherEpisode" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+"""
 
 
 def _episode_rss(

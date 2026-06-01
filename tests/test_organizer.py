@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from hermes_dmhy_anime_subscription.config import OrganizerConfig
 from hermes_dmhy_anime_subscription.models import OrganizerMode
 from hermes_dmhy_anime_subscription.monitor import OrganizerInput
@@ -162,7 +164,10 @@ def test_bangumi_lookup_uses_season_aware_release_title_for_s02(tmp_path):
     assert result.actions[0].destination_path == library / "示例 第二季" / "Example Show - S02E03 - Subs [1080p].mkv"
 
 
-def test_bangumi_lookup_uses_primary_alias_for_slash_separated_release_titles(tmp_path):
+@pytest.mark.parametrize("separator", [" / ", "/", " /", "/ "])
+def test_bangumi_lookup_uses_primary_alias_for_slash_separated_release_titles(
+    tmp_path, separator
+):
     source = tmp_path / "downloads" / "[DMG&SumiSora&LoliHouse] Tongari Boushi no Atelier - 08 [WebRip 1080p HEVC-10bit AAC ASSx2].mkv"
     source.parent.mkdir()
     source.write_bytes(b"video")
@@ -172,7 +177,7 @@ def test_bangumi_lookup_uses_primary_alias_for_slash_separated_release_titles(tm
     result = organize_media(
         _organizer_input(
             source,
-            title="[DMG&SumiSora&LoliHouse] Tongari Boushi no Atelier / 尖帽子的魔法工房 - 08 [WebRip 1080p HEVC-10bit AAC ASSx2]",
+            title=f"[DMG&SumiSora&LoliHouse] Tongari Boushi no Atelier{separator}尖帽子的魔法工房 - 08 [WebRip 1080p HEVC-10bit AAC ASSx2]",
         ),
         OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
         bangumi_lookup=lambda title: calls.append(title) or "尖帽子的魔法工房",
