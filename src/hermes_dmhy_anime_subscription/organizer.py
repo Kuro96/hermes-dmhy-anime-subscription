@@ -17,6 +17,7 @@ SUBTITLE_EXTENSIONS = frozenset({".ass", ".srt", ".ssa", ".vtt"})
 IGNORED_NAME_PARTS = frozenset({"sample", "extras", "extra", "trailer", "ncop", "nced"})
 DEFAULT_SEASON = 1
 BangumiLookup = Callable[[str], str | None]
+PATH_LIKE_FIRST_SEGMENTS = frozenset({"mnt", "home", "opt", "var", "tmp", "usr", "etc", "media", "volumes", "downloads"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,7 +72,12 @@ def organize_media(organizer_input: OrganizerInput, config: OrganizerConfig, *, 
     bangumi_titles: dict[str, str | None] = {}
 
     for video in videos:
-        info = _episode_info(video, organizer_input.title, organizer_input.metadata)
+        info = _episode_info(
+            video,
+            organizer_input.title,
+            organizer_input.metadata,
+            prefer_stem_episode=len(videos) > 1,
+        )
         info = _with_bangumi_title(info, bangumi_lookup, bangumi_titles)
         infos[video] = info
         destination = _video_destination(library_root, info, video.suffix)
@@ -153,9 +159,20 @@ def _safe_size(path: Path) -> int:
         return 0
 
 
-def _episode_info(path: Path, title: str, metadata: dict[str, object]) -> _EpisodeInfo:
+def _episode_info(
+    path: Path, title: str, metadata: dict[str, object], *, prefer_stem_episode: bool = False
+) -> _EpisodeInfo:
     text = f"{title} {path.stem}"
-    season, episode = _parse_episode(text)
+    title_season, title_episode = _parse_episode(title) if title else (DEFAULT_SEASON, None)
+    stem_season, stem_episode = _parse_episode(path.stem)
+    if stem_episode is not None and prefer_stem_episode:
+        season = stem_season if stem_season != DEFAULT_SEASON else title_season
+        episode = stem_episode
+    elif stem_episode is not None and title_episode is None:
+        season = title_season if title_season != DEFAULT_SEASON else stem_season
+        episode = stem_episode
+    else:
+        season, episode = title_season, title_episode
     release_group = _metadata_text(metadata, "release_group") or _parse_release_group(text) or "Unknown"
     quality = _metadata_text(metadata, "quality") or _parse_quality(text) or "Unknown"
     series_title = _metadata_text(metadata, "series_title") or _series_title(title, path.stem, release_group, quality)
@@ -192,9 +209,72 @@ def _parse_episode(text: str) -> tuple[int, int | None]:
     season_episode = re.search(r"\bS(?P<season>\d{1,2})\s*E(?P<episode>\d{1,3})\b", text, flags=re.IGNORECASE)
     if season_episode:
         return int(season_episode.group("season")), int(season_episode.group("episode"))
-    bracketed = re.search(r"(?:^|[\s_\-.\[\(])(?P<episode>\d{1,3})(?:v\d+)?(?:[\s_\-.\]\)]|$)", text)
-    if bracketed:
-        return DEFAULT_SEASON, int(bracketed.group("episode"))
+    season_then_episode = re.search(
+        r"\bS(?P<season>\d{1,2})\b[\s_.-]+(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if season_then_episode:
+        return int(season_then_episode.group("season")), int(season_then_episode.group("episode"))
+    for pattern in (
+        r"\bSeason\s*(?P<season>\d{1,2})\b[\s_.-]+(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
+        r"\b(?P<season>\d{1,2})(?:st|nd|rd|th)\s+Season\b[\s_.-]+(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
+        r"第\s*(?P<season>\d{1,2})\s*[季期][\s_.-]*(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
+    ):
+        season_word_episode = re.search(pattern, text, flags=re.IGNORECASE)
+        if season_word_episode:
+            return int(season_word_episode.group("season")), int(season_word_episode.group("episode"))
+    episode_of_total = re.search(
+        r"(?:^|[\s_\-\[\(]|(?<!\d)\.)(?P<episode>\d{1,3})(?:v\d+)?\s+of\s+\d{1,3}(?=$|[\s_\-\]\)]|\.(?!\d))",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if episode_of_total:
+        return DEFAULT_SEASON, int(episode_of_total.group("episode"))
+    episode_range = re.search(
+        r"(?:^|[\s_\-\[\(]|(?<!\d)\.)(?P<episode>\d{1,3})(?:v\d+)?[-_]\d{1,3}(?=$|[\s_\-\]\)]|\.(?!\d))",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if episode_range:
+        return DEFAULT_SEASON, int(episode_range.group("episode"))
+    bracketed_episode = re.search(
+        r"\[(?P<episode>\d{1,3})(?:v\d+)?(?:\s+(?:(?:480|720|1080|2160)p|4k)\b[^\]]*)?\]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if bracketed_episode:
+        return DEFAULT_SEASON, int(bracketed_episode.group("episode"))
+    for pattern in (
+        r"\bS(?P<season>\d{1,2})\b",
+        r"\bSeason\s*(?P<season>\d{1,2})\b",
+        r"\b(?P<season>\d{1,2})(?:st|nd|rd|th)\s+Season\b",
+        r"第\s*(?P<season>\d{1,2})\s*[季期]",
+    ):
+        season_only = re.search(pattern, text, flags=re.IGNORECASE)
+        if season_only:
+            return int(season_only.group("season")), None
+    candidate_text = re.sub(
+        r"\[[^\]]*\b(?:(?:480|720|1080|2160)p|4k)\b[^\]]*\]",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    candidate_text = re.sub(
+        r"\[[^\]]*\b(?:aac|flac|opus|dts|ac3|eac3|avc|hevc|h264|h265|x264|x265|hi10p|bit)\b[^\]]*\]",
+        " ",
+        candidate_text,
+        flags=re.IGNORECASE,
+    )
+    candidates = list(
+        re.finditer(
+            r"(?:^|[\s_\-\[\(]|(?<!\d)\.)(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
+            candidate_text,
+            flags=re.IGNORECASE,
+        )
+    )
+    if candidates:
+        return DEFAULT_SEASON, int(candidates[-1].group("episode"))
     return DEFAULT_SEASON, None
 
 
@@ -210,14 +290,60 @@ def _parse_quality(text: str) -> str | None:
 
 def _series_title(title: str, stem: str, release_group: str, quality: str) -> str:
     value = title or stem
+    leading_group_match = re.match(r"^\s*\[(?P<group>[^\]]+)\]", value)
+    had_leading_release_group_marker = bool(
+        leading_group_match and leading_group_match.group("group").casefold() == release_group.casefold()
+    )
     value = re.sub(r"^\s*\[[^\]]+\]\s*", "", value)
     value = re.sub(r"\[[^\]]*\]", " ", value)
     value = re.sub(r"\bS\d{1,2}\s*E\d{1,3}\b", " ", value, flags=re.IGNORECASE)
-    value = re.sub(r"(?:^|[\s_\-.])\d{1,3}(?:v\d+)?(?:[\s_\-.]|$)", " ", value)
-    for token in (release_group, quality):
-        if token:
-            value = re.sub(re.escape(token), " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bS\d{1,2}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bSeason\s*\d{1,2}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)\s+Season\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"第\s*\d{1,2}\s*[季期]", " ", value)
+    if quality:
+        value = _remove_title_token(value, quality)
+    value = _remove_trailing_episode_token(value)
+    if release_group and not had_leading_release_group_marker:
+        if len(release_group.strip()) > 1:
+            value = _remove_leading_title_token(value, release_group)
+            value = _remove_delimited_title_token(value, release_group)
     return re.sub(r"[\s_.-]+", " ", value).strip()
+
+
+def _remove_trailing_episode_token(value: str) -> str:
+    value = re.sub(
+        r"(?P<prefix>^|[\s_.-])\d{1,3}(?:v\d+)?\s+of\s+\d{1,3}[\s_.-]*$",
+        lambda match: match.group("prefix"),
+        value,
+        flags=re.IGNORECASE,
+    )
+    value = re.sub(
+        r"(?P<prefix>^|[\s_.-])\d{1,3}(?:v\d+)?[-_]\d{1,3}[\s_.-]*$",
+        lambda match: match.group("prefix"),
+        value,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"(?P<prefix>^|[\s_.-])\d{1,3}(?:v\d+)?[\s_.-]*$", lambda match: match.group("prefix"), value)
+
+
+def _remove_leading_title_token(value: str, token: str) -> str:
+    token_pattern = re.escape(token)
+    return re.sub(rf"^\s*{token_pattern}(?=$|[\s_.-])", " ", value, flags=re.IGNORECASE)
+
+
+def _remove_delimited_title_token(value: str, token: str) -> str:
+    token_pattern = re.escape(token)
+    return re.sub(
+        rf"(?P<left>^|[\s_.-]*[-_.][\s_.-]*){token_pattern}(?=$|[\s_.-]*[-_.])",
+        lambda match: match.group("left"),
+        value,
+        flags=re.IGNORECASE,
+    )
+
+
+def _remove_title_token(value: str, token: str) -> str:
+    return re.sub(rf"(?<![^\W_]){re.escape(token)}(?![^\W_])", " ", value, flags=re.IGNORECASE)
 
 
 def _lookup_title(title: str, stem: str, series_title: str) -> str:
@@ -231,12 +357,45 @@ def _lookup_title(title: str, stem: str, series_title: str) -> str:
 def _primary_title_alias(value: str) -> str:
     """Return the cleanest non-season title alias for external metadata lookup."""
 
+    if "://" not in value and (separator := re.search(r"(?<!:)/{2,}", value)):
+        left_alias = value[: separator.start()].strip()
+        return left_alias or _first_non_empty_slash_alias(value[separator.end() :])
+
     for match in re.finditer(r"/", value):
+        left = value[: match.start()]
+        right = value[match.end() :]
+        left_alias = left.strip()
+        right_alias = right.strip()
+        left_spaced = bool(left) and left[-1].isspace()
+        right_spaced = bool(right) and right[0].isspace()
+        path_like = _has_path_like_continuation(value[match.start() :])
+        if path_like:
+            return value.strip()
+        if left_spaced or right_spaced:
+            return left_alias or _first_non_empty_slash_alias(right)
+        if not left_alias or not right_alias:
+            return left_alias or right_alias
         left_script = _nearest_title_script(value, match.start() - 1, -1)
         right_script = _nearest_title_script(value, match.end(), 1)
         if {left_script, right_script} == {"latin", "cjk"}:
-            return value[: match.start()].strip()
+            return left_alias
     return value.strip()
+
+
+def _first_non_empty_slash_alias(value: str) -> str:
+    for alias in (part.strip() for part in value.split("/")):
+        if alias:
+            return alias
+    return ""
+
+
+def _has_path_like_continuation(value: str) -> bool:
+    stripped = value.lstrip()
+    if not stripped.startswith("/") or stripped.startswith("//"):
+        return False
+    token = stripped.split(maxsplit=1)[0][1:]
+    first_segment, _, _ = token.partition("/")
+    return bool(first_segment) and first_segment.casefold() in PATH_LIKE_FIRST_SEGMENTS
 
 
 def _nearest_title_script(value: str, index: int, step: int) -> str:
