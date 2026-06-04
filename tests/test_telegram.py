@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from urllib.parse import parse_qs
 import json
 
+import pytest
+
 from hermes_dmhy_anime_subscription.config import TelegramConfig
 from hermes_dmhy_anime_subscription.models import NotificationEvent
 from hermes_dmhy_anime_subscription.telegram import (
@@ -14,7 +16,7 @@ from hermes_dmhy_anime_subscription.telegram import (
 )
 
 
-FAKE_TOKEN = "123456:TEST_TOKEN_VALUE_1234567890"
+FAKE_TOKEN = "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi"
 
 
 class MockTransport:
@@ -116,6 +118,34 @@ def test_html_parse_mode_escapes_dynamic_title_and_message(monkeypatch):
     assert payload["text"] == ["Example &lt;Anime&gt; &amp; Friends\nOrganizer &lt;completed&gt; &amp; copied"]
 
 
+@pytest.mark.parametrize(
+    "token",
+    [
+        f"{FAKE_TOKEN}\n",
+        "123456:short",
+        "123456:short.secret-with-invalid-dot",
+        "123456:secret/value_with_invalid_slash",
+    ],
+)
+def test_runtime_bot_token_rejects_malformed_values_without_sending(monkeypatch, token):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", token)
+    transport = MockTransport()
+    notifier = TelegramNotifier(
+        TelegramConfig(enabled=True, bot_token_env="TELEGRAM_BOT_TOKEN", chat_id="chat-1"),
+        transport=transport,
+    )
+
+    result = notifier.notify(_event())
+
+    assert result.success is False
+    assert result.retryable is False
+    assert result.failure is not None
+    assert result.failure.recoverable is False
+    assert "is malformed" in result.message
+    assert token not in json.dumps(asdict(result), default=str)
+    assert transport.requests == []
+
+
 def test_telegram_error_messages_redact_full_bot_url_and_raw_bot_token_fragment(monkeypatch):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", FAKE_TOKEN)
     full_url = f"https://api.telegram.org/bot{FAKE_TOKEN}/sendMessage"
@@ -136,6 +166,44 @@ def test_telegram_error_messages_redact_full_bot_url_and_raw_bot_token_fragment(
     assert "bot<redacted>" in result.message
     assert result.error is not None
     assert FAKE_TOKEN not in result.error.message
+
+
+def test_telegram_error_messages_redact_raw_runtime_token_response_body(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", FAKE_TOKEN)
+    transport = MockTransport([TelegramHttpResponse(status=500, body=FAKE_TOKEN)])
+    notifier = TelegramNotifier(
+        TelegramConfig(enabled=True, bot_token_env="TELEGRAM_BOT_TOKEN", chat_id="chat-1"),
+        transport=transport,
+    )
+
+    result = notifier.notify(_event())
+
+    serialized = json.dumps(asdict(result), default=str)
+    assert result.success is False
+    assert FAKE_TOKEN not in serialized
+    assert "<redacted>" in result.message
+
+
+def test_telegram_error_messages_redact_malformed_echoed_bot_urls(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", FAKE_TOKEN)
+    malformed_url = "https://api.telegram.org/bot123456:short.secret-with-invalid-dot/sendMessage"
+    slash_url = "https://api.telegram.org/bot123456:secret/value_with_invalid_slash/sendMessage"
+    body = f"failed at {malformed_url} and {slash_url}"
+    transport = MockTransport([TelegramHttpResponse(status=500, body=body)])
+    notifier = TelegramNotifier(
+        TelegramConfig(enabled=True, bot_token_env="TELEGRAM_BOT_TOKEN", chat_id="chat-1"),
+        transport=transport,
+    )
+
+    result = notifier.notify(_event())
+    serialized = json.dumps(asdict(result), default=str)
+
+    assert result.success is False
+    assert malformed_url not in serialized
+    assert slash_url not in serialized
+    assert "short.secret-with-invalid-dot" not in serialized
+    assert "secret/value_with_invalid_slash" not in serialized
+    assert "https://api.telegram.org/bot<redacted>/sendMessage" in result.message
 
 
 def _event(*, title: str = "Example Anime") -> NotificationEvent:

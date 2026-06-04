@@ -79,6 +79,9 @@ class TelegramConfig:
     timeout: float | None = None
 
 
+TELEGRAM_PARSE_MODES = frozenset({"Markdown", "MarkdownV2", "HTML"})
+
+
 @dataclass(frozen=True, slots=True)
 class RetryConfig:
     max_attempts: int
@@ -240,6 +243,8 @@ def _parse_telegram(raw: dict[str, Any]) -> TelegramConfig:
         raise ConfigError("telegram.chat_id is required when telegram.enabled is true")
     if message_thread_id is not None and message_thread_id < 0:
         raise ConfigError("telegram.message_thread_id must be non-negative")
+    if parse_mode not in TELEGRAM_PARSE_MODES:
+        raise ConfigError("telegram.parse_mode must be one of Markdown, MarkdownV2, HTML")
     if timeout is not None and timeout <= 0:
         raise ConfigError("telegram.timeout must be greater than zero")
     return TelegramConfig(
@@ -305,7 +310,7 @@ def _optional_env_name(value: Any, label: str) -> str | None:
 
 
 def _looks_like_telegram_bot_token(value: str) -> bool:
-    return bool(re.fullmatch(r"\d{6,}:[A-Za-z0-9_-]{20,}", value.strip()))
+    return bool(re.fullmatch(r"\d+:[A-Za-z0-9_-]{35}", value.strip()))
 
 
 def _string_tuple(value: Any, label: str) -> tuple[str, ...]:

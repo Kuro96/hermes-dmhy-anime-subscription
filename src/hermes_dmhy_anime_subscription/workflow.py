@@ -35,7 +35,7 @@ from .organizer import OrganizerResult, organize_media
 from .qbittorrent import QbittorrentClient, QbittorrentSubmitResult, QbittorrentTorrent
 from .rules import DedupeDecision, match_rules
 from .state import SubscriptionState
-from .telegram import TelegramDispatchResult, TelegramNotifier
+from .telegram import TelegramDispatchResult, TelegramNotifier, _valid_bot_token
 from .webhook import (
     WebhookDeliveryPlan,
     WebhookDispatchResult,
@@ -182,8 +182,33 @@ class ProductionTickResult:
                     }
                     for result in self.monitor_result.organizer_results
                 ],
+                "telegram_results": [
+                    _telegram_result_summary(result)
+                    for result in self.monitor_result.telegram_results
+                ],
             },
         }
+
+
+def _telegram_result_summary(result: TelegramDispatchResult) -> dict[str, object]:
+    return {
+        "success": result.success,
+        "status": result.status,
+        "message": result.message,
+        "method": result.plan.method,
+        "redacted_url": result.plan.redacted_url,
+        "retryable": result.retryable,
+        "http_status": result.http_status,
+        "failure": _failure_summary(result.failure),
+    }
+
+
+def _failure_summary(failure: FailureRecord | None) -> dict[str, object] | None:
+    if failure is None:
+        return None
+    summary = asdict(failure)
+    summary["last_failed_at"] = failure.last_failed_at.isoformat()
+    return summary
 
 
 @dataclass(frozen=True, slots=True)
@@ -432,6 +457,8 @@ def monitor_once(
     config = load_config(config_path)
     if organize:
         ensure_apply_safe(config, dry_run=dry_run)
+    elif not dry_run:
+        _ensure_telegram_apply_safe(config)
     deps = dependencies or WorkflowDependencies()
     notifier = (
         deps.webhook_factory(config)
@@ -472,30 +499,19 @@ def monitor_once(
                 organizer_inputs_by_job_id[organizer_input.job_id] = organizer_input
                 organizer_result = organizer_runner(organizer_input, effective_config)
                 organizer_results.append(organizer_result)
-                _record_organizer_actions(state, organizer_result, dry_run=dry_run)
+                _record_organizer_actions(
+                    state,
+                    organizer_result,
+                    dry_run=dry_run,
+                    telegram_enabled=config.telegram.enabled,
+                )
         telegram_results: tuple[TelegramDispatchResult, ...] = ()
         if not dry_run and config.telegram.enabled:
-            telegram_results = tuple(
-                _notify_telegram(
-                    telegram_notifier,
-                    event,
-                    cover_fetcher=deps.bangumi_cover_fetcher or fetch_subject_cover_url,
-                )
-                for organizer_result in organizer_results
-                for event in _telegram_events_for_organizer_result(
-                    organizer_result,
-                    organizer_inputs_by_job_id.get(organizer_result.job_id),
-                )
+            telegram_results = _dispatch_pending_telegram_notifications(
+                state,
+                telegram_notifier,
+                cover_fetcher=deps.bangumi_cover_fetcher or fetch_subject_cover_url,
             )
-            for telegram_result in telegram_results:
-                if telegram_result.failure is not None:
-                    state.record_failure(
-                        telegram_result.failure.subject_id,
-                        telegram_result.failure.stage,
-                        telegram_result.failure.message,
-                        telegram_result.failure.attempts,
-                        telegram_result.failure.recoverable,
-                    )
         if not dry_run:
             _record_completed_satisfied_season_packs(state, config)
         archive_events = (
@@ -675,7 +691,9 @@ def organize_once(
     effective_config = _dry_run_organizer_config(config) if dry_run else config
     result = organizer_runner(organizer_input, effective_config)
     with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
-        _record_organizer_actions(state, result, dry_run=dry_run)
+        _record_organizer_actions(
+            state, result, dry_run=dry_run, telegram_enabled=False
+        )
     webhook_results = tuple(
         _notify(notifier, event, dry_run=dry_run) for event in result.events
     )
@@ -741,7 +759,9 @@ def plan_completed_dry_run(
                 organizer_input, _dry_run_organizer_config(config)
             )
             organizer_results.append(organizer_result)
-            _record_organizer_actions(state, organizer_result, dry_run=True)
+            _record_organizer_actions(
+                state, organizer_result, dry_run=True, telegram_enabled=False
+            )
         webhook_results = tuple(
             _notify(notifier, event, dry_run=True)
             for event in (
@@ -954,13 +974,21 @@ def ensure_apply_safe(config: PluginConfig, *, dry_run: bool) -> None:
         raise ConfigError(
             "apply mode requires webhook URL environment variable to be set when webhook is enabled"
         )
-    if (
-        config.telegram.enabled
-        and config.telegram.bot_token_env
-        and not os.environ.get(config.telegram.bot_token_env)
-    ):
+    _ensure_telegram_apply_safe(config)
+
+
+def _ensure_telegram_apply_safe(config: PluginConfig) -> None:
+    if not config.telegram.enabled:
+        return
+    token_env = config.telegram.bot_token_env
+    token = os.environ.get(token_env or "")
+    if not token:
         raise ConfigError(
             "apply mode requires Telegram bot token environment variable to be set when Telegram is enabled"
+        )
+    if not _valid_bot_token(token):
+        raise ConfigError(
+            "apply mode requires Telegram bot token environment variable to contain a valid Telegram bot token when Telegram is enabled"
         )
 
 
@@ -1375,41 +1403,201 @@ def _notify(
     )
 
 
+def _dispatch_pending_telegram_notifications(
+    state: SubscriptionState,
+    notifier: TelegramNotifier,
+    *,
+    cover_fetcher: BangumiCoverFetcher,
+) -> tuple[TelegramDispatchResult, ...]:
+    results: list[TelegramDispatchResult] = []
+    for job in state.list_jobs():
+        notifications = _telegram_notifications(job.get("metadata"))
+        changed = False
+        for notification in notifications:
+            if not _telegram_notification_should_dispatch(notification):
+                continue
+            event = _telegram_event_from_notification(notification)
+            if event is None:
+                continue
+            result = _notify_telegram(notifier, event, cover_fetcher=cover_fetcher)
+            results.append(result)
+            changed = True
+            if result.success:
+                notification["status"] = "sent"
+                notification.pop("last_failure", None)
+                if not _has_failed_telegram_notification(notifications):
+                    state.clear_failure(event.job_id or event.event_type, "telegram")
+            else:
+                notification["status"] = "failed"
+                notification["retryable"] = result.retryable
+                notification["last_failure"] = _telegram_result_summary(result)
+                if result.failure is not None:
+                    state.record_failure(
+                        result.failure.subject_id,
+                        result.failure.stage,
+                        result.failure.message,
+                        result.failure.attempts,
+                        result.failure.recoverable,
+                    )
+        if changed:
+            metadata = dict(job.get("metadata") if isinstance(job.get("metadata"), dict) else {})
+            metadata[_TELEGRAM_NOTIFICATIONS_KEY] = notifications
+            _save_job_metadata(state, job, metadata)
+    return tuple(results)
+
+
+def _telegram_notifications(metadata: object) -> list[dict[str, object]]:
+    if not isinstance(metadata, dict):
+        return []
+    value = metadata.get(_TELEGRAM_NOTIFICATIONS_KEY)
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _telegram_notification_should_dispatch(notification: dict[str, object]) -> bool:
+    status = notification.get("status")
+    return status == "pending" or (status == "failed" and notification.get("retryable") is True)
+
+
+def _has_failed_telegram_notification(notifications: Iterable[dict[str, object]]) -> bool:
+    return any(
+        notification.get("status") == "failed"
+        for notification in notifications
+    )
+
+
+def _telegram_event_from_notification(notification: dict[str, object]) -> NotificationEvent | None:
+    event = notification.get("event")
+    if not isinstance(event, dict):
+        return None
+    created_at = event.get("created_at")
+    if isinstance(created_at, str):
+        try:
+            parsed_created_at = datetime.fromisoformat(created_at)
+        except ValueError:
+            parsed_created_at = datetime.now(timezone.utc)
+    else:
+        parsed_created_at = datetime.now(timezone.utc)
+    metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
+    return NotificationEvent(
+        event_type=str(event.get("event_type") or "organizer_completed"),
+        title=str(event.get("title") or "Episode organized"),
+        message=str(event.get("message") or "Organizer completed episode"),
+        job_id=str(event["job_id"]) if event.get("job_id") is not None else None,
+        severity=str(event.get("severity") or "info"),
+        metadata=dict(metadata),
+        created_at=parsed_created_at,
+    )
+
+
+def _record_pending_telegram_notifications(
+    metadata: dict[str, object], events: Iterable[NotificationEvent]
+) -> dict[str, object]:
+    notifications = _telegram_notifications(metadata)
+    existing_keys = {str(item.get("key")) for item in notifications if item.get("key") is not None}
+    for event in events:
+        key = _telegram_notification_key(event)
+        if key in existing_keys:
+            continue
+        notifications.append(
+            {
+                "key": key,
+                "status": "pending",
+                "retryable": True,
+                "event": _telegram_event_record(event),
+            }
+        )
+        existing_keys.add(key)
+    if notifications:
+        metadata[_TELEGRAM_NOTIFICATIONS_KEY] = notifications
+    return metadata
+
+
+def _telegram_notification_key(event: NotificationEvent) -> str:
+    episode = event.metadata.get("episode")
+    destination = event.metadata.get("destination_path")
+    return f"{event.event_type}:{event.job_id}:{episode}:{destination}"
+
+
+def _telegram_event_record(event: NotificationEvent) -> dict[str, object]:
+    return {
+        "event_type": event.event_type,
+        "title": event.title,
+        "message": event.message,
+        "job_id": event.job_id,
+        "severity": event.severity,
+        "metadata": dict(event.metadata),
+        "created_at": event.created_at.isoformat(),
+    }
+
+
+def _save_job_metadata(
+    state: SubscriptionState, job: dict[str, object], metadata: dict[str, object]
+) -> None:
+    state.upsert_job(
+        str(job["job_id"]),
+        dedupe_key=str(job["dedupe_key"]),
+        status=str(job["status"]),
+        torrent_hash=job.get("torrent_hash") if isinstance(job.get("torrent_hash"), str) else None,
+        retry_count=int(job["retry_count"]),
+        last_error=job.get("last_error") if isinstance(job.get("last_error"), str) else None,
+        organizer_outcome=job.get("organizer_outcome") if isinstance(job.get("organizer_outcome"), str) else None,
+        metadata=metadata,
+    )
+
+
 def _telegram_events_for_organizer_result(
     result: OrganizerResult,
     organizer_input: OrganizerInput | None,
 ) -> tuple[NotificationEvent, ...]:
     if organizer_input is None:
         return ()
-    subject_id = _integral_episode(organizer_input.metadata.get("bangumi_subject_id"))
-    if subject_id is None:
-        return ()
-    events: list[NotificationEvent] = []
-    for action in result.actions:
-        if action.status != "applied" or action.media_type != "video" or action.episode is None:
-            continue
-        metadata = dict(organizer_input.metadata)
-        metadata.update(
-            {
-                "source_path": str(action.source_path),
-                "destination_path": str(action.destination_path) if action.destination_path else None,
-                "media_type": action.media_type,
-                "episode": action.episode,
-                "season": action.season,
-                "status": action.status,
-            }
-        )
-        events.append(
-            NotificationEvent(
-                event_type="organizer_completed",
-                title=organizer_input.title,
-                message="Organizer completed episode",
-                job_id=result.job_id,
-                severity="info",
-                metadata=metadata,
+    return tuple(
+        event
+        for action in result.actions
+        if (
+            event := _telegram_event_for_organizer_action(
+                result, action, title=organizer_input.title, base_metadata=organizer_input.metadata
             )
         )
-    return tuple(events)
+        is not None
+    )
+
+
+def _telegram_event_for_organizer_action(
+    result: OrganizerResult, action: object, *, title: str, base_metadata: dict[str, object]
+) -> NotificationEvent | None:
+    subject_id = _integral_episode(base_metadata.get("bangumi_subject_id"))
+    if subject_id is None:
+        return None
+    if (
+        getattr(action, "status", None) != "applied"
+        or getattr(action, "media_type", None) != "video"
+        or getattr(action, "episode", None) is None
+    ):
+        return None
+    metadata = dict(base_metadata)
+    metadata.update(
+        {
+            "source_path": str(getattr(action, "source_path")),
+            "destination_path": str(getattr(action, "destination_path"))
+            if getattr(action, "destination_path", None)
+            else None,
+            "media_type": getattr(action, "media_type"),
+            "episode": getattr(action, "episode"),
+            "season": getattr(action, "season", None),
+            "status": getattr(action, "status"),
+        }
+    )
+    return NotificationEvent(
+        event_type="organizer_completed",
+        title=title,
+        message="Organizer completed episode",
+        job_id=result.job_id,
+        severity="info",
+        metadata=metadata,
+    )
 
 
 def _notify_telegram(
@@ -1421,12 +1609,19 @@ def _notify_telegram(
     cover_url = None
     subject_id = _integral_episode(event.metadata.get("bangumi_subject_id"))
     if subject_id is not None:
-        cover_url = cover_fetcher(subject_id)
+        try:
+            cover_url = cover_fetcher(subject_id)
+        except Exception:
+            cover_url = None
     return notifier.notify(event, cover_url=cover_url)
 
 
 def _record_organizer_actions(
-    state: SubscriptionState, result: OrganizerResult, *, dry_run: bool
+    state: SubscriptionState,
+    result: OrganizerResult,
+    *,
+    dry_run: bool,
+    telegram_enabled: bool,
 ) -> None:
     for action in result.actions:
         if action.destination_path is None:
@@ -1448,6 +1643,15 @@ def _record_organizer_actions(
                 metadata["episodes"] = sorted(episodes)
             if applied and action.season is not None:
                 metadata["season"] = action.season
+            if applied and telegram_enabled:
+                event = _telegram_event_for_organizer_action(
+                    result,
+                    action,
+                    title=str(metadata.get("title") or result.job_id),
+                    base_metadata=metadata,
+                )
+                if event is not None:
+                    metadata = _record_pending_telegram_notifications(metadata, (event,))
             state.upsert_job(
                 result.job_id,
                 dedupe_key=str(job["dedupe_key"]),
@@ -1517,6 +1721,9 @@ def _satisfied_season_pack_from_job(
     if not isinstance(series_key, str) or season is None:
         return None
     return rule_name, series_key, season
+
+
+_TELEGRAM_NOTIFICATIONS_KEY = "telegram_notifications"
 
 
 _ACTIVE_STATUSES = (

@@ -7,8 +7,8 @@ import pytest
 
 from hermes_dmhy_anime_subscription import cli, register
 from hermes_dmhy_anime_subscription import workflow
-from hermes_dmhy_anime_subscription.config import load_config
-from hermes_dmhy_anime_subscription.models import DownloadJobStatus
+from hermes_dmhy_anime_subscription.config import ConfigError, load_config
+from hermes_dmhy_anime_subscription.models import DownloadJobStatus, FailureRecord
 from hermes_dmhy_anime_subscription.monitor import OrganizerInput, TorrentSnapshot
 from hermes_dmhy_anime_subscription.organizer import OrganizerAction, OrganizerResult
 from hermes_dmhy_anime_subscription.qbittorrent import (
@@ -3438,7 +3438,7 @@ def test_monitor_once_dry_run_does_not_persist_subscription_archival(tmp_path):
 
 
 def test_monitor_once_sends_telegram_for_applied_video_episode_with_bangumi_cover(tmp_path, monkeypatch):
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST_TOKEN_VALUE_1234567890")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
     config_path = _telegram_config(tmp_path)
     torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
     source = tmp_path / "downloads" / "Example Anime - 01.mkv"
@@ -3499,6 +3499,409 @@ def test_monitor_once_sends_telegram_for_applied_video_episode_with_bangumi_cove
     assert result.telegram_results[0].success is True
 
 
+def test_monitor_once_retries_retryable_telegram_failure_from_durable_queue(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    config_path = _telegram_config(tmp_path)
+    torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+
+    class RetryableFailureTelegramNotifier:
+        def __init__(self):
+            self.calls = []
+
+        def notify(self, event, *, cover_url=None):
+            self.calls.append((event, cover_url))
+            plan = TelegramDeliveryPlan(
+                "https://api.telegram.org/bot<fake>/sendMessage",
+                "https://api.telegram.org/bot<redacted>/sendMessage",
+                "sendMessage",
+                {},
+            )
+            return TelegramDispatchResult(
+                False,
+                "failed",
+                "Telegram delivery failed via sendMessage: retry later",
+                plan,
+                retryable=True,
+                failure=FailureRecord(
+                    event.job_id or event.event_type,
+                    "telegram",
+                    "Telegram delivery failed via sendMessage: retry later",
+                    1,
+                    event.created_at,
+                    True,
+                ),
+                http_status=503,
+            )
+
+    first_notifier = RetryableFailureTelegramNotifier()
+    second_notifier = RecordingTelegramNotifier()
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-telegram-retry",
+            dedupe_key=f"infohash:{torrent_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=torrent_hash,
+            metadata={"title": "Example Anime", "rule_name": "example-show", "bangumi_subject_id": 12345},
+        )
+
+    def organize_episode(item, config):
+        return OrganizerResult(
+            item.job_id,
+            config.organizer.mode,
+            (
+                OrganizerAction(
+                    Path(item.source_path),
+                    tmp_path / "library" / "Example Anime - S01E01.mkv",
+                    "applied",
+                    "video",
+                    episode=1,
+                ),
+            ),
+        )
+
+    first = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash=torrent_hash,
+                name="Example Anime",
+                state="uploading",
+                progress=1.0,
+                content_path=str(tmp_path / "downloads" / "Example Anime - 01.mkv"),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            organizer_runner=organize_episode,
+            telegram_factory=lambda _config: first_notifier,
+            bangumi_cover_fetcher=lambda _subject_id: None,
+        ),
+    )
+
+    assert len(first.telegram_results) == 1
+    assert first.telegram_results[0].retryable is True
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-telegram-retry")
+        assert job is not None
+        notification = job["metadata"]["telegram_notifications"][0]
+        assert notification["status"] == "failed"
+        assert notification["retryable"] is True
+        assert notification["last_failure"]["http_status"] == 503
+
+    second = monitor_once(
+        config_path,
+        snapshots=(),
+        dry_run=False,
+        organize=False,
+        dependencies=WorkflowDependencies(telegram_factory=lambda _config: second_notifier),
+    )
+
+    assert len(first_notifier.calls) == 1
+    assert len(second_notifier.calls) == 1
+    assert len(second.telegram_results) == 1
+    assert second.telegram_results[0].success is True
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-telegram-retry")
+        assert job is not None
+        notification = job["metadata"]["telegram_notifications"][0]
+        assert notification["status"] == "sent"
+        assert "last_failure" not in notification
+        assert state.get_failure("job-telegram-retry", "telegram") is None
+
+
+@pytest.mark.parametrize("unsafe_token", [None, "not-a-token"])
+def test_monitor_once_blocks_unsafe_telegram_queue_dispatch_without_terminal_failure(
+    tmp_path, monkeypatch, unsafe_token
+):
+    config_path = _telegram_config(tmp_path)
+    if unsafe_token is None:
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", unsafe_token)
+
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-telegram-unsafe-token",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.COMPLETED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+            metadata={
+                "title": "Example Anime",
+                "rule_name": "example-show",
+                "telegram_notifications": [
+                    _telegram_notification_record(
+                        1,
+                        "job-telegram-unsafe-token",
+                        tmp_path / "library" / "Example Anime - S01E01.mkv",
+                    )
+                ],
+            },
+        )
+
+    with pytest.raises(ConfigError, match="Telegram bot token"):
+        monitor_once(config_path, snapshots=(), dry_run=False, organize=False)
+
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-telegram-unsafe-token")
+        assert job is not None
+        notification = job["metadata"]["telegram_notifications"][0]
+        assert notification["status"] == "pending"
+        assert notification["retryable"] is True
+        assert "last_failure" not in notification
+        assert state.get_failure("job-telegram-unsafe-token", "telegram") is None
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    notifier = RecordingTelegramNotifier()
+    result = monitor_once(
+        config_path,
+        snapshots=(),
+        dry_run=False,
+        organize=False,
+        dependencies=WorkflowDependencies(telegram_factory=lambda _config: notifier),
+    )
+
+    assert len(notifier.calls) == 1
+    assert len(result.telegram_results) == 1
+    assert result.telegram_results[0].success is True
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-telegram-unsafe-token")
+        assert job is not None
+        notification = job["metadata"]["telegram_notifications"][0]
+        assert notification["status"] == "sent"
+
+
+def test_monitor_once_keeps_telegram_failure_until_all_job_notifications_are_sent(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    config_path = _telegram_config(tmp_path)
+
+    class MixedTelegramNotifier:
+        def __init__(self, outcomes):
+            self.outcomes = list(outcomes)
+            self.calls = []
+
+        def notify(self, event, *, cover_url=None):
+            self.calls.append((event, cover_url))
+            plan = TelegramDeliveryPlan(
+                "https://api.telegram.org/bot<fake>/sendMessage",
+                "https://api.telegram.org/bot<redacted>/sendMessage",
+                "sendMessage",
+                {},
+            )
+            success = self.outcomes.pop(0)
+            if success:
+                return TelegramDispatchResult(True, "sent", "sent", plan)
+            return TelegramDispatchResult(
+                False,
+                "failed",
+                "Telegram delivery failed via sendMessage: retry later",
+                plan,
+                retryable=True,
+                failure=FailureRecord(
+                    event.job_id or event.event_type,
+                    "telegram",
+                    "Telegram delivery failed via sendMessage: retry later",
+                    1,
+                    event.created_at,
+                    True,
+                ),
+                http_status=503,
+            )
+
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-telegram-multi",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.COMPLETED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+            metadata={
+                "title": "Example Anime",
+                "rule_name": "example-show",
+                "telegram_notifications": [
+                    _telegram_notification_record(1, "job-telegram-multi", tmp_path / "library" / "Example Anime - S01E01.mkv"),
+                    _telegram_notification_record(2, "job-telegram-multi", tmp_path / "library" / "Example Anime - S01E02.mkv"),
+                ],
+            },
+        )
+
+    first_notifier = MixedTelegramNotifier([False, True])
+    first = monitor_once(
+        config_path,
+        snapshots=(),
+        dry_run=False,
+        organize=False,
+        dependencies=WorkflowDependencies(telegram_factory=lambda _config: first_notifier),
+    )
+
+    assert [call[0].metadata["episode"] for call in first_notifier.calls] == [1, 2]
+    assert len(first.telegram_results) == 2
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-telegram-multi")
+        assert job is not None
+        notifications = job["metadata"]["telegram_notifications"]
+        assert notifications[0]["status"] == "failed"
+        assert notifications[0]["retryable"] is True
+        assert notifications[1]["status"] == "sent"
+        assert state.get_failure("job-telegram-multi", "telegram") is not None
+
+    second_notifier = MixedTelegramNotifier([True])
+    second = monitor_once(
+        config_path,
+        snapshots=(),
+        dry_run=False,
+        organize=False,
+        dependencies=WorkflowDependencies(telegram_factory=lambda _config: second_notifier),
+    )
+
+    assert [call[0].metadata["episode"] for call in second_notifier.calls] == [1]
+    assert len(second.telegram_results) == 1
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-telegram-multi")
+        assert job is not None
+        notifications = job["metadata"]["telegram_notifications"]
+        assert notifications[0]["status"] == "sent"
+        assert notifications[1]["status"] == "sent"
+        assert state.get_failure("job-telegram-multi", "telegram") is None
+
+
+def test_monitor_once_keeps_non_retryable_telegram_failure_after_later_notification_succeeds(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    config_path = _telegram_config(tmp_path)
+
+    class NonRetryableThenSuccessTelegramNotifier:
+        def __init__(self):
+            self.calls = []
+
+        def notify(self, event, *, cover_url=None):
+            self.calls.append((event, cover_url))
+            plan = TelegramDeliveryPlan(
+                "https://api.telegram.org/bot<fake>/sendMessage",
+                "https://api.telegram.org/bot<redacted>/sendMessage",
+                "sendMessage",
+                {},
+            )
+            if event.metadata["episode"] == 2:
+                return TelegramDispatchResult(True, "sent", "sent", plan)
+            return TelegramDispatchResult(
+                False,
+                "failed",
+                "Telegram delivery failed via sendMessage: bad request",
+                plan,
+                retryable=False,
+                failure=FailureRecord(
+                    event.job_id or event.event_type,
+                    "telegram",
+                    "Telegram delivery failed via sendMessage: bad request",
+                    1,
+                    event.created_at,
+                    False,
+                ),
+                http_status=400,
+            )
+
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-telegram-nonretryable-multi",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.COMPLETED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+            metadata={
+                "title": "Example Anime",
+                "rule_name": "example-show",
+                "telegram_notifications": [
+                    _telegram_notification_record(1, "job-telegram-nonretryable-multi", tmp_path / "library" / "Example Anime - S01E01.mkv"),
+                    _telegram_notification_record(2, "job-telegram-nonretryable-multi", tmp_path / "library" / "Example Anime - S01E02.mkv"),
+                ],
+            },
+        )
+
+    notifier = NonRetryableThenSuccessTelegramNotifier()
+    result = monitor_once(
+        config_path,
+        snapshots=(),
+        dry_run=False,
+        organize=False,
+        dependencies=WorkflowDependencies(telegram_factory=lambda _config: notifier),
+    )
+
+    assert [call[0].metadata["episode"] for call in notifier.calls] == [1, 2]
+    assert len(result.telegram_results) == 2
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-telegram-nonretryable-multi")
+        assert job is not None
+        notifications = job["metadata"]["telegram_notifications"]
+        assert notifications[0]["status"] == "failed"
+        assert notifications[0]["retryable"] is False
+        assert notifications[0]["last_failure"]["retryable"] is False
+        assert notifications[1]["status"] == "sent"
+        failure = state.get_failure("job-telegram-nonretryable-multi", "telegram")
+        assert failure is not None
+        assert failure["message"] == "Telegram delivery failed via sendMessage: bad request"
+        assert not bool(failure["recoverable"])
+
+
+def test_organize_once_apply_does_not_queue_telegram_for_later_monitor_delivery(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    config_path = _telegram_config(tmp_path)
+    notifier = RecordingTelegramNotifier()
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-organize-once-telegram",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.COMPLETED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+            metadata={"title": "Example Anime", "rule_name": "example-show", "bangumi_subject_id": 12345},
+        )
+
+    organizer_input = OrganizerInput(
+        "job-organize-once-telegram",
+        "abcdef1234567890abcdef1234567890abcdef12",
+        "Example Anime",
+        str(tmp_path / "downloads" / "Example Anime - 01.mkv"),
+        datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
+        {"title": "Example Anime", "rule_name": "example-show", "bangumi_subject_id": 12345},
+    )
+
+    def organize_episode(item, config):
+        return OrganizerResult(
+            item.job_id,
+            config.organizer.mode,
+            (
+                OrganizerAction(
+                    Path(item.source_path),
+                    tmp_path / "library" / "Example Anime - S01E01.mkv",
+                    "applied",
+                    "video",
+                    episode=1,
+                ),
+            ),
+        )
+
+    organize_once(
+        config_path,
+        organizer_input,
+        dry_run=False,
+        dependencies=WorkflowDependencies(organizer_runner=organize_episode),
+    )
+
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-organize-once-telegram")
+        assert job is not None
+        assert "telegram_notifications" not in job["metadata"]
+
+    result = monitor_once(
+        config_path,
+        snapshots=(),
+        dry_run=False,
+        organize=False,
+        dependencies=WorkflowDependencies(telegram_factory=lambda _config: notifier),
+    )
+
+    assert notifier.calls == []
+    assert result.telegram_results == ()
+
+
 @pytest.mark.parametrize(
     ("dry_run", "status", "media_type", "episode", "metadata"),
     [
@@ -3512,7 +3915,7 @@ def test_monitor_once_sends_telegram_for_applied_video_episode_with_bangumi_cove
 def test_monitor_once_does_not_send_telegram_without_required_applied_video_episode_conditions(
     tmp_path, monkeypatch, dry_run, status, media_type, episode, metadata
 ):
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST_TOKEN_VALUE_1234567890")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
     config_path = _telegram_config(tmp_path)
     torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
     notifier = RecordingTelegramNotifier()
@@ -3565,6 +3968,63 @@ def test_monitor_once_does_not_send_telegram_without_required_applied_video_epis
     assert result.telegram_results == ()
 
 
+def test_monitor_once_sends_telegram_without_cover_when_bangumi_cover_fetcher_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
+    config_path = _telegram_config(tmp_path)
+    torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+    notifier = RecordingTelegramNotifier()
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-telegram-cover-fallback",
+            dedupe_key=f"infohash:{torrent_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=torrent_hash,
+            metadata={"title": "Example Anime", "rule_name": "example-show", "bangumi_subject_id": 12345},
+        )
+
+    def organize_episode(item, config):
+        return OrganizerResult(
+            item.job_id,
+            config.organizer.mode,
+            (
+                OrganizerAction(
+                    Path(item.source_path),
+                    tmp_path / "library" / "Example Anime - S01E01.mkv",
+                    "applied",
+                    "video",
+                    episode=1,
+                ),
+            ),
+        )
+
+    def fail_cover_fetch(_subject_id):
+        raise RuntimeError("Bangumi unavailable")
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash=torrent_hash,
+                name="Example Anime",
+                state="uploading",
+                progress=1.0,
+                content_path=str(tmp_path / "downloads" / "Example Anime - 01.mkv"),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            organizer_runner=organize_episode,
+            telegram_factory=lambda _config: notifier,
+            bangumi_cover_fetcher=fail_cover_fetch,
+        ),
+    )
+
+    assert len(notifier.calls) == 1
+    assert notifier.calls[0][1] is None
+    assert len(result.telegram_results) == 1
+    assert result.telegram_results[0].success is True
+
+
 def test_monitor_once_skips_telegram_and_cover_fetch_when_telegram_disabled(tmp_path):
     config_path = _config(tmp_path, organizer_mode="move")
     torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
@@ -3614,6 +4074,10 @@ def test_monitor_once_skips_telegram_and_cover_fetch_when_telegram_disabled(tmp_
     assert len(result.organizer_results) == 1
     assert cover_subject_ids == []
     assert result.telegram_results == ()
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-telegram-disabled")
+        assert job is not None
+        assert "telegram_notifications" not in job["metadata"]
 
 
 def test_register_tolerates_partial_hermes_contexts_and_exposes_tools():
@@ -3834,6 +4298,61 @@ def test_production_tick_lists_all_qbittorrent_torrents_to_avoid_stale_category_
     assert qbit.list_calls == [(None, True)]
 
 
+def test_production_tick_summary_includes_telegram_failure_details():
+    failed_at = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
+    plan = TelegramDeliveryPlan(
+        "https://api.telegram.org/bot<fake>/sendMessage",
+        "https://api.telegram.org/bot<redacted>/sendMessage",
+        "sendMessage",
+        {},
+    )
+    result = workflow.ProductionTickResult(
+        dry_run=False,
+        run_result=workflow.RunOnceResult(False, 0, 0, (), ()),
+        monitor_result=workflow.MonitorOnceResult(
+            (),
+            (),
+            (),
+            telegram_results=(
+                TelegramDispatchResult(
+                    False,
+                    "failed",
+                    "Telegram delivery failed via sendMessage: retry later",
+                    plan,
+                    retryable=True,
+                    failure=FailureRecord(
+                        "job-telegram",
+                        "telegram",
+                        "Telegram delivery failed via sendMessage: retry later",
+                        1,
+                        failed_at,
+                        True,
+                    ),
+                    http_status=503,
+                ),
+            ),
+        ),
+    )
+
+    summary = result.summary()
+
+    telegram = summary["monitor"]["telegram_results"][0]
+    assert summary["ok"] is False
+    assert telegram["success"] is False
+    assert telegram["message"] == "Telegram delivery failed via sendMessage: retry later"
+    assert telegram["retryable"] is True
+    assert telegram["http_status"] == 503
+    assert telegram["failure"] == {
+        "subject_id": "job-telegram",
+        "stage": "telegram",
+        "message": "Telegram delivery failed via sendMessage: retry later",
+        "attempts": 1,
+        "last_failed_at": "2026-05-24T12:00:00+00:00",
+        "recoverable": True,
+    }
+    json.dumps(summary)
+
+
 def test_cli_schedule_tick_apply_prints_json_summary(tmp_path, monkeypatch, capsys):
     config_path = _config(tmp_path)
 
@@ -3957,6 +4476,30 @@ def _telegram_config(tmp_path):
     }
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
+
+
+def _telegram_notification_record(episode, job_id, destination_path):
+    created_at = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
+    return {
+        "key": f"organizer_completed:{job_id}:{episode}:{destination_path}",
+        "status": "pending",
+        "retryable": True,
+        "event": {
+            "event_type": "organizer_completed",
+            "title": "Example Anime",
+            "message": "Organizer completed episode",
+            "job_id": job_id,
+            "severity": "info",
+            "metadata": {
+                "bangumi_subject_id": 12345,
+                "destination_path": str(destination_path),
+                "episode": episode,
+                "media_type": "video",
+                "status": "applied",
+            },
+            "created_at": created_at.isoformat(),
+        },
+    }
 
 
 def _episode_and_pack_rss():

@@ -177,7 +177,9 @@ Archived rules are created only by apply-mode monitoring after a rule with `bang
 
 ### `telegram`
 
-`enabled` turns Telegram episode update delivery on or off. Telegram delivery runs only during non-dry-run monitoring after the organizer successfully applies a video episode action, so download submission and dry-run planning do not send chat messages.
+`enabled` turns Telegram episode update delivery on or off. Telegram delivery runs only during non-dry-run monitoring after the organizer successfully applies a video episode action, so download submission, `organize-once`, and dry-run planning do not send chat messages.
+
+When Telegram is enabled, a successful non-dry-run monitor organizer action first records a durable pending Telegram notification in state. The same non-dry-run monitor pass dispatches pending notifications, and retryable Telegram failures remain queued for later monitor runs. A later `monitor-once --apply` run with `organize=False` or no new organizer result still retries existing queued Telegram notifications. When Telegram is disabled, organizer success does not queue Telegram notifications.
 
 `bot_token_env` is the environment variable name that contains the Telegram bot token. Do not put the bot token in the config file; literal token-shaped values are rejected. Apply mode requires this env var to be set when Telegram delivery is enabled.
 

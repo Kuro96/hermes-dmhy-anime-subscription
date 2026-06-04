@@ -18,6 +18,8 @@ from .models import FailureRecord, NotificationEvent
 DEFAULT_TIMEOUT_SECONDS = 30.0
 RETRYABLE_STATUS_CODES = frozenset({408, 429, 500, 502, 503, 504})
 API_ROOT = "https://api.telegram.org"
+_BOT_TOKEN_PATTERN = re.compile(r"\d+:[A-Za-z0-9_-]{35}")
+_BOT_TOKEN_URL_PATTERN = re.compile(r"https://api\.telegram\.org/bot[^\s\"'<>]+")
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +115,11 @@ class TelegramNotifier:
             message = f"Telegram bot token environment variable {self.config.bot_token_env} is not set"
             error = TelegramError("configuration", message, retryable=False)
             return TelegramDispatchResult(False, "failed", message, plan, error=error, failure=_failure_record(event, message, recoverable=False))
+        if not _valid_bot_token(token):
+            plan = TelegramDeliveryPlan(url="", redacted_url="<redacted>", method="configuration", payload={})
+            message = f"Telegram bot token environment variable {self.config.bot_token_env} is malformed"
+            error = TelegramError("configuration", message, retryable=False)
+            return TelegramDispatchResult(False, "failed", message, plan, error=error, failure=_failure_record(event, message, recoverable=False))
         plan = self._plan(event, cover_url=cover_url)
         try:
             response = self._post_form(plan, token)
@@ -121,7 +128,7 @@ class TelegramNotifier:
         if 200 <= response.status < 300:
             return TelegramDispatchResult(True, "sent", f"Telegram delivered via {plan.method}", plan, http_status=response.status)
         retryable = response.status in RETRYABLE_STATUS_CODES
-        message = _response_message(response, f"Telegram delivery failed via {plan.method}", plan=plan)
+        message = _response_message(response, f"Telegram delivery failed via {plan.method}", plan=plan, token=token)
         return _failure(plan, "api", message, retryable=retryable, http_status=response.status, event=event)
 
     def _plan(self, event: NotificationEvent, *, cover_url: str | None) -> TelegramDeliveryPlan:
@@ -142,13 +149,13 @@ class TelegramNotifier:
         return TelegramDeliveryPlan(url=url, redacted_url=url, method=method, payload=payload)
 
     def _post_form(self, plan: TelegramDeliveryPlan, token: str) -> TelegramHttpResponse:
-        request = TelegramHttpRequest(
-            url=f"{API_ROOT}/bot{token}/{plan.method}",
-            data=plan.body(),
-            headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
-            timeout=self.config.timeout or DEFAULT_TIMEOUT_SECONDS,
-        )
         try:
+            request = TelegramHttpRequest(
+                url=f"{API_ROOT}/bot{token}/{plan.method}",
+                data=plan.body(),
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"},
+                timeout=self.config.timeout or DEFAULT_TIMEOUT_SECONDS,
+            )
             return self.transport.send(request)
         except (TimeoutError, socket.timeout, URLError, OSError) as exc:
             raise _RetryableTransportError(f"Telegram request failed: {exc.__class__.__name__}") from exc
@@ -174,6 +181,10 @@ def _escape_for_parse_mode(value: str, parse_mode: str | None) -> str:
     if normalized == "html":
         return html.escape(value, quote=False)
     return value
+
+
+def _valid_bot_token(token: str) -> bool:
+    return bool(_BOT_TOKEN_PATTERN.fullmatch(token))
 
 
 def _failure(
@@ -208,16 +219,34 @@ def _failure_record(event: NotificationEvent, message: str, *, recoverable: bool
     )
 
 
-def _response_message(response: TelegramHttpResponse, default: str, *, plan: TelegramDeliveryPlan) -> str:
+def _response_message(
+    response: TelegramHttpResponse,
+    default: str,
+    *,
+    plan: TelegramDeliveryPlan,
+    token: str | None = None,
+) -> str:
     body = response.body.strip()
     if body:
-        return f"{default}: {_redact_text(body, plan=plan)}"
+        return f"{default}: {_redact_text(body, plan=plan, token=token)}"
     return default
 
 
-def _redact_text(value: str, *, plan: TelegramDeliveryPlan) -> str:
+def _redact_text(value: str, *, plan: TelegramDeliveryPlan, token: str | None = None) -> str:
     redacted = value.replace(plan.url, plan.redacted_url)
-    return re.sub(r"bot\d{6,}:[A-Za-z0-9_-]{20,}", "bot<redacted>", redacted)
+    if token:
+        redacted = redacted.replace(token, "<redacted>")
+    redacted = _BOT_TOKEN_URL_PATTERN.sub(_redact_telegram_url, redacted)
+    return re.sub(r"bot\d+:[^\s\"'<>]+", "bot<redacted>", redacted)
+
+
+def _redact_telegram_url(match: re.Match[str]) -> str:
+    value = match.group(0)
+    marker = "/send"
+    method_start = value.find(marker)
+    if method_start == -1:
+        return f"{API_ROOT}/bot<redacted>"
+    return f"{API_ROOT}/bot<redacted>{value[method_start:]}"
 
 
 class _RetryableTransportError(RuntimeError):

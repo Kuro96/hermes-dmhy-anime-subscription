@@ -62,6 +62,38 @@ def test_telegram_enabled_settings_parse(tmp_path):
     assert config.telegram.timeout == 12.5
 
 
+@pytest.mark.parametrize("parse_mode", ["Markdown", "MarkdownV2", "HTML"])
+def test_telegram_parse_mode_accepts_supported_modes(tmp_path, parse_mode):
+    raw = json.loads((FIXTURE_DIR / "valid.example.json").read_text(encoding="utf-8"))
+    raw["telegram"] = {
+        "enabled": True,
+        "bot_token_env": "TELEGRAM_BOT_TOKEN",
+        "chat_id": "-1001234567890",
+        "parse_mode": parse_mode,
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    config = load_config(path)
+
+    assert config.telegram.parse_mode == parse_mode
+
+
+def test_telegram_parse_mode_rejects_unknown_mode(tmp_path):
+    raw = json.loads((FIXTURE_DIR / "valid.example.json").read_text(encoding="utf-8"))
+    raw["telegram"] = {
+        "enabled": True,
+        "bot_token_env": "TELEGRAM_BOT_TOKEN",
+        "chat_id": "-1001234567890",
+        "parse_mode": "PlainText",
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="telegram.parse_mode"):
+        load_config(path)
+
+
 @pytest.mark.parametrize(
     ("telegram_config", "message"),
     [
@@ -83,7 +115,7 @@ def test_telegram_bot_token_env_rejects_literal_bot_token(tmp_path):
     raw = json.loads((FIXTURE_DIR / "valid.example.json").read_text(encoding="utf-8"))
     raw["telegram"] = {
         "enabled": True,
-        "bot_token_env": "123456:TEST_TOKEN_VALUE_1234567890",
+        "bot_token_env": "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi",
         "chat_id": "-1001234567890",
     }
     path = tmp_path / "config.json"
