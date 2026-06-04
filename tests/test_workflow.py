@@ -17,6 +17,7 @@ from hermes_dmhy_anime_subscription.qbittorrent import (
     plan_qbittorrent_submission,
 )
 from hermes_dmhy_anime_subscription.state import SubscriptionState
+from hermes_dmhy_anime_subscription.telegram import TelegramDeliveryPlan, TelegramDispatchResult
 from hermes_dmhy_anime_subscription.workflow import (
     WorkflowDependencies,
     ensure_apply_safe,
@@ -3436,6 +3437,185 @@ def test_monitor_once_dry_run_does_not_persist_subscription_archival(tmp_path):
     assert not (tmp_path / "state.sqlite3").exists()
 
 
+def test_monitor_once_sends_telegram_for_applied_video_episode_with_bangumi_cover(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST_TOKEN_VALUE_1234567890")
+    config_path = _telegram_config(tmp_path)
+    torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+    source = tmp_path / "downloads" / "Example Anime - 01.mkv"
+    notifier = RecordingTelegramNotifier()
+    cover_subject_ids = []
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-telegram",
+            dedupe_key=f"infohash:{torrent_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=torrent_hash,
+            metadata={"title": "Example Anime", "rule_name": "example-show", "bangumi_subject_id": 12345},
+        )
+
+    def organize_episode(item, config):
+        return OrganizerResult(
+            item.job_id,
+            config.organizer.mode,
+            (
+                OrganizerAction(
+                    Path(item.source_path),
+                    tmp_path / "library" / "Example Anime - S01E01.mkv",
+                    "applied",
+                    "video",
+                    episode=1,
+                ),
+            ),
+        )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash=torrent_hash,
+                name="Example Anime",
+                state="uploading",
+                progress=1.0,
+                content_path=str(source),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            organizer_runner=organize_episode,
+            telegram_factory=lambda _config: notifier,
+            bangumi_cover_fetcher=lambda subject_id: cover_subject_ids.append(subject_id) or "https://img.example.invalid/cover.jpg",
+        ),
+    )
+
+    assert cover_subject_ids == [12345]
+    assert len(notifier.calls) == 1
+    event, cover_url = notifier.calls[0]
+    assert event.event_type == "organizer_completed"
+    assert event.job_id == "job-telegram"
+    assert event.metadata["bangumi_subject_id"] == 12345
+    assert event.metadata["episode"] == 1
+    assert cover_url == "https://img.example.invalid/cover.jpg"
+    assert len(result.telegram_results) == 1
+    assert result.telegram_results[0].success is True
+
+
+@pytest.mark.parametrize(
+    ("dry_run", "status", "media_type", "episode", "metadata"),
+    [
+        (True, "applied", "video", 1, {"bangumi_subject_id": 12345}),
+        (False, "planned", "video", 1, {"bangumi_subject_id": 12345}),
+        (False, "applied", "subtitle", 1, {"bangumi_subject_id": 12345}),
+        (False, "applied", "video", None, {"bangumi_subject_id": 12345}),
+        (False, "applied", "video", 1, {}),
+    ],
+)
+def test_monitor_once_does_not_send_telegram_without_required_applied_video_episode_conditions(
+    tmp_path, monkeypatch, dry_run, status, media_type, episode, metadata
+):
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:TEST_TOKEN_VALUE_1234567890")
+    config_path = _telegram_config(tmp_path)
+    torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+    notifier = RecordingTelegramNotifier()
+    cover_subject_ids = []
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-telegram",
+            dedupe_key=f"infohash:{torrent_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=torrent_hash,
+            metadata={"title": "Example Anime", "rule_name": "example-show", **metadata},
+        )
+
+    def organize_episode(item, config):
+        return OrganizerResult(
+            item.job_id,
+            config.organizer.mode,
+            (
+                OrganizerAction(
+                    Path(item.source_path),
+                    tmp_path / "library" / "Example Anime - S01E01.mkv",
+                    status,
+                    media_type,
+                    episode=episode,
+                ),
+            ),
+        )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash=torrent_hash,
+                name="Example Anime",
+                state="uploading",
+                progress=1.0,
+                content_path=str(tmp_path / "downloads" / "Example Anime - 01.mkv"),
+            ),
+        ),
+        dry_run=dry_run,
+        dependencies=WorkflowDependencies(
+            organizer_runner=organize_episode,
+            telegram_factory=lambda _config: notifier,
+            bangumi_cover_fetcher=lambda subject_id: cover_subject_ids.append(subject_id) or "https://img.example.invalid/cover.jpg",
+        ),
+    )
+
+    assert notifier.calls == []
+    assert cover_subject_ids == []
+    assert result.telegram_results == ()
+
+
+def test_monitor_once_skips_telegram_and_cover_fetch_when_telegram_disabled(tmp_path):
+    config_path = _config(tmp_path, organizer_mode="move")
+    torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+    cover_subject_ids = []
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-telegram-disabled",
+            dedupe_key=f"infohash:{torrent_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=torrent_hash,
+            metadata={"title": "Example Anime", "rule_name": "example-show", "bangumi_subject_id": 12345},
+        )
+
+    def organize_episode(item, config):
+        return OrganizerResult(
+            item.job_id,
+            config.organizer.mode,
+            (
+                OrganizerAction(
+                    Path(item.source_path),
+                    tmp_path / "library" / "Example Anime - S01E01.mkv",
+                    "applied",
+                    "video",
+                    episode=1,
+                ),
+            ),
+        )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash=torrent_hash,
+                name="Example Anime",
+                state="uploading",
+                progress=1.0,
+                content_path=str(tmp_path / "downloads" / "Example Anime - 01.mkv"),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            organizer_runner=organize_episode,
+            bangumi_cover_fetcher=lambda subject_id: cover_subject_ids.append(subject_id) or None,
+        ),
+    )
+
+    assert len(result.organizer_results) == 1
+    assert cover_subject_ids == []
+    assert result.telegram_results == ()
+
+
 def test_register_tolerates_partial_hermes_contexts_and_exposes_tools():
     ctx = RecordingContext()
 
@@ -3740,6 +3920,20 @@ class RecordingContext:
         self.commands[name] = handler
 
 
+class RecordingTelegramNotifier:
+    def __init__(self):
+        self.calls = []
+
+    def notify(self, event, *, cover_url=None):
+        self.calls.append((event, cover_url))
+        return TelegramDispatchResult(
+            True,
+            "sent",
+            "sent",
+            TelegramDeliveryPlan("https://api.telegram.org/bot<fake>/sendMessage", "https://api.telegram.org/bot<redacted>/sendMessage", "sendMessage", {}),
+        )
+
+
 def _config(tmp_path, organizer_mode="dry-run"):
     raw = json.loads(VALID_CONFIG.read_text(encoding="utf-8"))
     raw["state"]["path"] = str(tmp_path / "state.sqlite3")
@@ -3749,6 +3943,18 @@ def _config(tmp_path, organizer_mode="dry-run"):
     raw["qbittorrent"]["save_path"] = str(tmp_path / "downloads")
     raw["subscriptions"]["rules"][0]["include_keywords"] = ["Example Anime", "1080p"]
     path = tmp_path / f"config-{organizer_mode}.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return path
+
+
+def _telegram_config(tmp_path):
+    path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["telegram"] = {
+        "enabled": True,
+        "bot_token_env": "TELEGRAM_BOT_TOKEN",
+        "chat_id": "chat-1",
+    }
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
 

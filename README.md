@@ -78,7 +78,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscriptio
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli schedule-tick --config /path/to/config.json --apply
 ```
 
-`--apply` performs the complete production tick: list all qBittorrent torrents so pre-existing active jobs are not missed after category changes, match those pre-existing active jobs to torrent state (including base32 RSS infohash to qBittorrent hex hash conversion), monitor completed downloads and run the organizer according to config, then submit newly matched RSS items to qBittorrent. It prints a JSON summary suitable for scheduler logs. Apply mode is still guarded by `ensure_apply_safe`: qBittorrent credential env var names and values must exist, webhook URL env values must exist when enabled, and `organizer.mode` must be `apply` or `move`.
+`--apply` performs the complete production tick: list all qBittorrent torrents so pre-existing active jobs are not missed after category changes, match those pre-existing active jobs to torrent state (including base32 RSS infohash to qBittorrent hex hash conversion), monitor completed downloads and run the organizer according to config, then submit newly matched RSS items to qBittorrent. It prints a JSON summary suitable for scheduler logs. Apply mode is still guarded by `ensure_apply_safe`: qBittorrent credential env var names and values must exist, webhook URL env values must exist when enabled, Telegram bot token env values must exist when enabled, and `organizer.mode` must be `apply` or `move`.
 
 The plugin does not install a service or cron job; use your own scheduler to call the bounded command at the configured interval.
 
@@ -174,6 +174,28 @@ Archived rules are created only by apply-mode monitoring after a rule with `bang
 `enabled` turns webhook delivery on or off.
 
 `url_env` is the environment variable name that contains the webhook URL. Do not put the URL in the config file. Apply mode requires this env var to be set when webhook delivery is enabled.
+
+### `telegram`
+
+`enabled` turns Telegram episode update delivery on or off. Telegram delivery runs only during non-dry-run monitoring after the organizer successfully applies a video episode action, so download submission and dry-run planning do not send chat messages.
+
+`bot_token_env` is the environment variable name that contains the Telegram bot token. Do not put the bot token in the config file; literal token-shaped values are rejected. Apply mode requires this env var to be set when Telegram delivery is enabled.
+
+`chat_id` is the target Telegram chat/channel ID. `message_thread_id` is optional for forum topics. `parse_mode` defaults to `Markdown`, and `timeout` optionally overrides the Telegram HTTP timeout in seconds.
+
+Telegram photo notifications use the rule's `bangumi_subject_id` to fetch the Bangumi subject cover URL. If a completed episode has no configured Bangumi subject ID, no Telegram episode update is sent.
+
+Example:
+
+```json
+{
+  "enabled": true,
+  "bot_token_env": "TELEGRAM_BOT_TOKEN",
+  "chat_id": "-1001234567890",
+  "message_thread_id": 22274,
+  "parse_mode": "Markdown"
+}
+```
 
 ### `retry`
 

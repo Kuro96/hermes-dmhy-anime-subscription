@@ -255,7 +255,7 @@ def _mark_completed(
         title=snapshot.name,
         source_path=source_path,
         completed_at=completed_at,
-        metadata={"qbittorrent_state": snapshot.state, **dict(snapshot.metadata)},
+        metadata={**metadata, "qbittorrent_state": snapshot.state, **dict(snapshot.metadata)},
     )
     return _SnapshotOutcome(
         organizer_inputs=(organizer_input,),

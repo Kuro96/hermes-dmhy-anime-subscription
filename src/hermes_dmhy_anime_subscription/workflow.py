@@ -15,6 +15,7 @@ from urllib.request import urlopen
 
 from .bangumi import (
     BangumiSubjectEpisodes,
+    fetch_subject_cover_url,
     fetch_subject_main_episodes,
     lookup_chinese_title,
 )
@@ -34,6 +35,7 @@ from .organizer import OrganizerResult, organize_media
 from .qbittorrent import QbittorrentClient, QbittorrentSubmitResult, QbittorrentTorrent
 from .rules import DedupeDecision, match_rules
 from .state import SubscriptionState
+from .telegram import TelegramDispatchResult, TelegramNotifier
 from .webhook import (
     WebhookDeliveryPlan,
     WebhookDispatchResult,
@@ -44,9 +46,11 @@ from .webhook import (
 FeedFetcher = Callable[[str], str]
 QbittorrentClientFactory = Callable[[PluginConfig], QbittorrentClient]
 WebhookNotifierFactory = Callable[[PluginConfig], WebhookNotifier]
+TelegramNotifierFactory = Callable[[PluginConfig], TelegramNotifier]
 OrganizerRunner = Callable[[OrganizerInput, PluginConfig], OrganizerResult]
 BangumiLookup = Callable[[str], str | None]
 BangumiSubjectFetcher = Callable[[int], BangumiSubjectEpisodes]
+BangumiCoverFetcher = Callable[[int], str | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,9 +58,11 @@ class WorkflowDependencies:
     feed_fetcher: FeedFetcher | None = None
     qbittorrent_factory: QbittorrentClientFactory | None = None
     webhook_factory: WebhookNotifierFactory | None = None
+    telegram_factory: TelegramNotifierFactory | None = None
     organizer_runner: OrganizerRunner | None = None
     bangumi_lookup: BangumiLookup | None = None
     bangumi_subject_fetcher: BangumiSubjectFetcher | None = None
+    bangumi_cover_fetcher: BangumiCoverFetcher | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +99,7 @@ class MonitorOnceResult:
     failures: tuple[FailureRecord, ...]
     organizer_results: tuple[OrganizerResult, ...] = ()
     webhook_results: tuple[WebhookDispatchResult, ...] = ()
+    telegram_results: tuple[TelegramDispatchResult, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +127,10 @@ class ProductionTickResult:
             webhook_failures = webhook_failures or any(
                 result.failure is not None
                 for result in self.monitor_result.webhook_results
+            )
+            webhook_failures = webhook_failures or any(
+                result.failure is not None
+                for result in self.monitor_result.telegram_results
             )
         return not (
             submit_failures
@@ -282,6 +293,7 @@ def run_once(
                 metadata = {
                     "title": candidate.title,
                     "rule_name": candidate.rule_name,
+                    "bangumi_subject_id": rule.bangumi_subject_id,
                     "episode": _candidate_episode(candidate),
                     "dry_run": dry_run,
                     "submit_status": submit_result.status,
@@ -320,6 +332,7 @@ def run_once(
                 severity="info" if submit_result.success else "error",
                 metadata={
                     "rule_name": candidate.rule_name,
+                    "bangumi_subject_id": rule.bangumi_subject_id,
                     "release_title": candidate.title,
                     "guid": candidate.feed_item.guid,
                     "infohash": candidate.feed_item.info_hash,
@@ -425,6 +438,11 @@ def monitor_once(
         if deps.webhook_factory
         else WebhookNotifier(config.webhook)
     )
+    telegram_notifier = (
+        deps.telegram_factory(config)
+        if deps.telegram_factory
+        else TelegramNotifier(config.telegram)
+    )
     bangumi_lookup = _bangumi_lookup(deps, dry_run=dry_run)
     organizer_runner = deps.organizer_runner or (
         lambda organizer_input, loaded_config: organize_media(
@@ -447,12 +465,37 @@ def monitor_once(
             plan_organizer=organize,
         )
         organizer_results: list[OrganizerResult] = []
+        organizer_inputs_by_job_id: dict[str, OrganizerInput] = {}
         effective_config = _dry_run_organizer_config(config) if dry_run else config
         if organize:
             for organizer_input in result.organizer_inputs:
+                organizer_inputs_by_job_id[organizer_input.job_id] = organizer_input
                 organizer_result = organizer_runner(organizer_input, effective_config)
                 organizer_results.append(organizer_result)
                 _record_organizer_actions(state, organizer_result, dry_run=dry_run)
+        telegram_results: tuple[TelegramDispatchResult, ...] = ()
+        if not dry_run and config.telegram.enabled:
+            telegram_results = tuple(
+                _notify_telegram(
+                    telegram_notifier,
+                    event,
+                    cover_fetcher=deps.bangumi_cover_fetcher or fetch_subject_cover_url,
+                )
+                for organizer_result in organizer_results
+                for event in _telegram_events_for_organizer_result(
+                    organizer_result,
+                    organizer_inputs_by_job_id.get(organizer_result.job_id),
+                )
+            )
+            for telegram_result in telegram_results:
+                if telegram_result.failure is not None:
+                    state.record_failure(
+                        telegram_result.failure.subject_id,
+                        telegram_result.failure.stage,
+                        telegram_result.failure.message,
+                        telegram_result.failure.attempts,
+                        telegram_result.failure.recoverable,
+                    )
         if not dry_run:
             _record_completed_satisfied_season_packs(state, config)
         archive_events = (
@@ -481,6 +524,7 @@ def monitor_once(
         result.failures,
         tuple(organizer_results),
         webhook_results,
+        telegram_results,
     )
 
 
@@ -910,6 +954,14 @@ def ensure_apply_safe(config: PluginConfig, *, dry_run: bool) -> None:
         raise ConfigError(
             "apply mode requires webhook URL environment variable to be set when webhook is enabled"
         )
+    if (
+        config.telegram.enabled
+        and config.telegram.bot_token_env
+        and not os.environ.get(config.telegram.bot_token_env)
+    ):
+        raise ConfigError(
+            "apply mode requires Telegram bot token environment variable to be set when Telegram is enabled"
+        )
 
 
 def fetch_url_text(url: str) -> str:
@@ -1321,6 +1373,56 @@ def _notify(
         message="Dry-run planned webhook delivery without HTTP mutation",
         plan=plan,
     )
+
+
+def _telegram_events_for_organizer_result(
+    result: OrganizerResult,
+    organizer_input: OrganizerInput | None,
+) -> tuple[NotificationEvent, ...]:
+    if organizer_input is None:
+        return ()
+    subject_id = _integral_episode(organizer_input.metadata.get("bangumi_subject_id"))
+    if subject_id is None:
+        return ()
+    events: list[NotificationEvent] = []
+    for action in result.actions:
+        if action.status != "applied" or action.media_type != "video" or action.episode is None:
+            continue
+        metadata = dict(organizer_input.metadata)
+        metadata.update(
+            {
+                "source_path": str(action.source_path),
+                "destination_path": str(action.destination_path) if action.destination_path else None,
+                "media_type": action.media_type,
+                "episode": action.episode,
+                "season": action.season,
+                "status": action.status,
+            }
+        )
+        events.append(
+            NotificationEvent(
+                event_type="organizer_completed",
+                title=organizer_input.title,
+                message="Organizer completed episode",
+                job_id=result.job_id,
+                severity="info",
+                metadata=metadata,
+            )
+        )
+    return tuple(events)
+
+
+def _notify_telegram(
+    notifier: TelegramNotifier,
+    event: NotificationEvent,
+    *,
+    cover_fetcher: BangumiCoverFetcher,
+) -> TelegramDispatchResult:
+    cover_url = None
+    subject_id = _integral_episode(event.metadata.get("bangumi_subject_id"))
+    if subject_id is not None:
+        cover_url = cover_fetcher(subject_id)
+    return notifier.notify(event, cover_url=cover_url)
 
 
 def _record_organizer_actions(

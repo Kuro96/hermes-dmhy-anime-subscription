@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +70,16 @@ class WebhookConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TelegramConfig:
+    enabled: bool = False
+    bot_token_env: str | None = None
+    chat_id: str | None = None
+    message_thread_id: int | None = None
+    parse_mode: str = "Markdown"
+    timeout: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class RetryConfig:
     max_attempts: int
     backoff_seconds: int
@@ -83,6 +94,7 @@ class PluginConfig:
     state: StateConfig
     organizer: OrganizerConfig
     webhook: WebhookConfig
+    telegram: TelegramConfig
     retry: RetryConfig
 
 
@@ -108,6 +120,7 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> PluginCon
     state_raw = _required_mapping(raw, "state")
     organizer_raw = _required_mapping(raw, "organizer")
     webhook_raw = _optional_mapping(raw, "webhook")
+    telegram_raw = _optional_mapping(raw, "telegram")
     retry_raw = _required_mapping(raw, "retry")
 
     return PluginConfig(
@@ -118,6 +131,7 @@ def parse_config(raw: dict[str, Any], base_dir: Path | None = None) -> PluginCon
         state=StateConfig(path=_path_value(state_raw, "path", base)),
         organizer=_parse_organizer(organizer_raw, base),
         webhook=_parse_webhook(webhook_raw),
+        telegram=_parse_telegram(telegram_raw),
         retry=_parse_retry(retry_raw),
     )
 
@@ -213,6 +227,31 @@ def _parse_webhook(raw: dict[str, Any]) -> WebhookConfig:
     return WebhookConfig(enabled=enabled, url_env=url_env)
 
 
+def _parse_telegram(raw: dict[str, Any]) -> TelegramConfig:
+    enabled = _bool_value(raw.get("enabled", False), "telegram.enabled")
+    bot_token_env = _optional_env_name(raw.get("bot_token_env"), "telegram.bot_token_env")
+    chat_id = _optional_string(raw.get("chat_id"), "telegram.chat_id")
+    message_thread_id = _optional_int_value(raw.get("message_thread_id"), "telegram.message_thread_id")
+    parse_mode = _optional_string(raw.get("parse_mode"), "telegram.parse_mode") or "Markdown"
+    timeout = _optional_number_value(raw.get("timeout"), "telegram.timeout")
+    if enabled and not bot_token_env:
+        raise ConfigError("telegram.bot_token_env is required when telegram.enabled is true")
+    if enabled and not chat_id:
+        raise ConfigError("telegram.chat_id is required when telegram.enabled is true")
+    if message_thread_id is not None and message_thread_id < 0:
+        raise ConfigError("telegram.message_thread_id must be non-negative")
+    if timeout is not None and timeout <= 0:
+        raise ConfigError("telegram.timeout must be greater than zero")
+    return TelegramConfig(
+        enabled=enabled,
+        bot_token_env=bot_token_env,
+        chat_id=chat_id,
+        message_thread_id=message_thread_id,
+        parse_mode=parse_mode,
+        timeout=timeout,
+    )
+
+
 def _parse_retry(raw: dict[str, Any]) -> RetryConfig:
     max_attempts = _int_value(raw.get("max_attempts"), "retry.max_attempts")
     backoff_seconds = _int_value(raw.get("backoff_seconds"), "retry.backoff_seconds")
@@ -256,11 +295,17 @@ def _optional_env_name(value: Any, label: str) -> str | None:
     env_name = _optional_string(value, label)
     if env_name is None:
         return None
+    if _looks_like_telegram_bot_token(env_name):
+        raise ConfigError(f"{label} must be an environment variable name, not a literal Telegram bot token")
     if "://" in env_name or "/" in env_name or "?" in env_name:
         raise ConfigError(f"{label} must be an environment variable name, not a URL or secret value")
     if not env_name.replace("_", "A").isalnum() or not (env_name[0].isalpha() or env_name[0] == "_"):
         raise ConfigError(f"{label} must be a valid environment variable name")
     return env_name
+
+
+def _looks_like_telegram_bot_token(value: str) -> bool:
+    return bool(re.fullmatch(r"\d{6,}:[A-Za-z0-9_-]{20,}", value.strip()))
 
 
 def _string_tuple(value: Any, label: str) -> tuple[str, ...]:
@@ -284,6 +329,14 @@ def _int_value(value: Any, label: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigError(f"{label} must be an integer")
     return value
+
+
+def _optional_number_value(value: Any, label: str) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ConfigError(f"{label} must be a number")
+    return float(value)
 
 
 def _bool_value(value: Any, label: str) -> bool:

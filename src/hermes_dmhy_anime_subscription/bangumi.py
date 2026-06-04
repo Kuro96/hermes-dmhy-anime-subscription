@@ -81,6 +81,30 @@ def fetch_subject_main_episodes(
     return BangumiSubjectEpisodes(subject_id=subject_id, eps=eps, main_episode_numbers=numbers)
 
 
+def fetch_subject_cover_url(
+    subject_id: int,
+    *,
+    opener: Callable[..., Any] = urlopen,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> str | None:
+    request = Request(
+        f"{SUBJECT_API_URL}/{subject_id}",
+        headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+        method="GET",
+    )
+    decoded = _read_json(request, opener=opener, timeout=timeout)
+    if not isinstance(decoded, dict):
+        return None
+    images = decoded.get("images")
+    if not isinstance(images, dict):
+        return None
+    for key in ("common", "large", "grid", "medium", "small"):
+        value = images.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _fetch_subject_eps(subject_id: int, *, opener: Callable[..., Any], timeout: float) -> int:
     request = Request(
         f"{SUBJECT_API_URL}/{subject_id}",
