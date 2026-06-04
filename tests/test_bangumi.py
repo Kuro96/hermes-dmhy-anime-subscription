@@ -1,7 +1,7 @@
 import json
 from urllib.error import URLError
 
-from hermes_dmhy_anime_subscription.bangumi import fetch_subject_main_episodes, lookup_chinese_title
+from hermes_dmhy_anime_subscription.bangumi import fetch_subject_cover_url, fetch_subject_main_episodes, lookup_chinese_title
 
 
 class _Response:
@@ -61,3 +61,25 @@ def test_fetch_subject_main_episodes_uses_v0_subject_and_main_episode_endpoints(
     assert calls[1][0].full_url == "https://api.bgm.tv/v0/episodes?subject_id=12345&type=0&limit=200&offset=0"
     assert calls[0][1] == 4.5
     assert calls[0][0].headers["User-agent"].startswith("hermes-dmhy-anime-subscription/")
+
+
+def test_fetch_subject_cover_url_extracts_v0_subject_image_in_preferred_order():
+    calls = []
+
+    def opener(request, *, timeout):
+        calls.append((request, timeout))
+        return _Response(
+            {
+                "images": {
+                    "large": "https://img.example.invalid/large.jpg",
+                    "common": "https://img.example.invalid/common.jpg",
+                    "grid": "https://img.example.invalid/grid.jpg",
+                }
+            }
+        )
+
+    result = fetch_subject_cover_url(12345, opener=opener, timeout=4.5)
+
+    assert result == "https://img.example.invalid/common.jpg"
+    assert calls[0][0].full_url == "https://api.bgm.tv/v0/subjects/12345"
+    assert calls[0][1] == 4.5
