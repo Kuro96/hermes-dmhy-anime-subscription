@@ -236,6 +236,24 @@ def test_bangumi_lookup_without_chinese_title_keeps_season_layout(tmp_path):
     assert result.actions[0].destination_path == library / "Frieren Beyond Journeys End" / "Season 01" / "Frieren Beyond Journeys End - S01E08 - Subs [1080p].mkv"
 
 
+def test_episode_title_after_number_is_not_kept_in_series_title(tmp_path):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+    calls = []
+
+    result = organize_media(
+        _organizer_input(source, title="[Subs] Example Show - 01 - The Beginning [1080p]"),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+        bangumi_lookup=lambda title: calls.append(title) or None,
+    )
+
+    assert calls == ["Example Show"]
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 01" / "Example Show - S01E01 - Subs [1080p].mkv"
+
+
 def test_bangumi_lookup_uses_season_aware_release_title_for_s02(tmp_path):
     source = tmp_path / "downloads" / "[Subs] Example Show S02E03 [1080p].mkv"
     source.parent.mkdir()

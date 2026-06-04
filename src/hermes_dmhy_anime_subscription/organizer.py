@@ -175,7 +175,10 @@ def _episode_info(
         season, episode = title_season, title_episode
     release_group = _metadata_text(metadata, "release_group") or _parse_release_group(text) or "Unknown"
     quality = _metadata_text(metadata, "quality") or _parse_quality(text) or "Unknown"
-    series_title = _metadata_text(metadata, "series_title") or _series_title(title, path.stem, release_group, quality)
+    series_episode = title_episode if title else stem_episode
+    series_title = _metadata_text(metadata, "series_title") or _series_title(
+        title, path.stem, release_group, quality, series_episode
+    )
     return _EpisodeInfo(
         title=_sanitize_segment(series_title) or "Unknown Series",
         lookup_title=_lookup_title(title, path.stem, series_title),
@@ -288,7 +291,7 @@ def _parse_quality(text: str) -> str | None:
     return match.group("quality") if match else None
 
 
-def _series_title(title: str, stem: str, release_group: str, quality: str) -> str:
+def _series_title(title: str, stem: str, release_group: str, quality: str, episode: int | None) -> str:
     value = title or stem
     leading_group_match = re.match(r"^\s*\[(?P<group>[^\]]+)\]", value)
     had_leading_release_group_marker = bool(
@@ -303,12 +306,26 @@ def _series_title(title: str, stem: str, release_group: str, quality: str) -> st
     value = re.sub(r"第\s*\d{1,2}\s*[季期]", " ", value)
     if quality:
         value = _remove_title_token(value, quality)
+    value = _remove_delimited_episode_title_suffix(value, episode)
     value = _remove_trailing_episode_token(value)
     if release_group and not had_leading_release_group_marker:
         if len(release_group.strip()) > 1:
             value = _remove_leading_title_token(value, release_group)
             value = _remove_delimited_title_token(value, release_group)
     return re.sub(r"[\s_.-]+", " ", value).strip()
+
+
+def _remove_delimited_episode_title_suffix(value: str, episode: int | None) -> str:
+    if episode is None:
+        return value
+    episode_pattern = rf"0*{episode}(?:v\d+)?"
+    delimiter = r"[\s_.-]*[-_.][\s_.-]*"
+    return re.sub(
+        rf"(?P<prefix>.*?){delimiter}{episode_pattern}{delimiter}\S.*$",
+        lambda match: match.group("prefix"),
+        value,
+        flags=re.IGNORECASE,
+    )
 
 
 def _remove_trailing_episode_token(value: str) -> str:
