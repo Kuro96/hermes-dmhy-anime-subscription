@@ -5,7 +5,7 @@ import pytest
 from hermes_dmhy_anime_subscription.config import OrganizerConfig
 from hermes_dmhy_anime_subscription.models import OrganizerMode
 from hermes_dmhy_anime_subscription.monitor import OrganizerInput
-from hermes_dmhy_anime_subscription.organizer import _primary_title_alias, organize_media
+from hermes_dmhy_anime_subscription.organizer import _parse_episode, _primary_title_alias, organize_media
 
 NOW = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
@@ -197,6 +197,325 @@ def test_season_only_title_without_episode_does_not_fabricate_episode_from_seaso
     assert result.actions[0].status == "unsorted"
     assert result.actions[0].episode is None
     assert result.actions[0].season == 2
+
+
+@pytest.mark.parametrize(
+    ("release_title", "expected_parse", "expected_unsorted_dir"),
+    [
+        ("[Subs] 86 - Eighty Six S04 [1080p]", (4, None), "86 Eighty Six"),
+        ("[Subs] Level 1 Demon Lord S02 [1080p]", (2, None), "Level 1 Demon Lord"),
+        ("[Subs] Example Show Season 2 [BD 2 Discs]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 [BD Vol.1]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 [Vol. 3]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 BD 2 Discs [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 BD Vol.1 [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 Vol. 3 [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 Part 2 [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show S02 Part 2 [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show 第2季 Part 2 [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 Cour 2 [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 [Part 2][1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 [Cour 2][1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 [01-12][1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 [01 - 12][1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show S02 [01 - 12][1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show 第2季 [01-12][1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show 第2季 [01 - 12][1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 - 01-12 [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show S02 - 01-12 [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show 2nd Season - 01-12 [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show 第2季 - 01-12 [1080p]", (2, None), "Example Show"),
+        ("[Subs] Example Show Season 2 - 01 - 12 [1080p]", (2, None), "Example Show"),
+    ],
+)
+def test_season_only_release_does_not_use_title_or_disc_numbers_as_episode(
+    tmp_path, release_title, expected_parse, expected_unsorted_dir
+):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == expected_parse
+    assert result.actions[0].status == "unsorted"
+    assert result.actions[0].season == expected_parse[0]
+    assert result.actions[0].episode is None
+    assert result.actions[0].destination_path == library / "_Unsorted" / expected_unsorted_dir / f"{expected_unsorted_dir}.mkv"
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show - 01-03 [1080p]",
+        "[Subs] Example Show - 01-04 [1080p]",
+        "[Subs] Example Show - 01-05 [1080p]",
+        "[Subs] Example Show - 01-06 [1080p]",
+        "[Subs] Example Show - 01-07 [1080p]",
+        "[Subs] Example Show - 01-08 [1080p]",
+        "[Subs] Example Show - 01-09 [1080p]",
+        "[Subs] Example Show - 01-12 [1080p]",
+        "[Subs] Example Show - 01_12 [1080p]",
+        "[Subs] Example Show - 01 - 12 [1080p]",
+        "[Subs] Example Show - 01 - 09 [1080p]",
+        "[Subs] Example Show [01-03][1080p]",
+        "[Subs] Example Show [01-08][1080p]",
+        "[Subs] Example Show [01-12][1080p]",
+        "[Subs] Example Show [01_12][1080p]",
+        "[Subs] Example Show [01 - 09][1080p]",
+    ],
+)
+def test_no_season_episode_ranges_are_unsorted_with_clean_series_title(tmp_path, release_title):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (1, None)
+    assert result.actions[0].status == "unsorted"
+    assert result.actions[0].season == 1
+    assert result.actions[0].episode is None
+    assert result.actions[0].destination_path == library / "_Unsorted" / "Example Show" / "Example Show.mkv"
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show BD 2 Discs - 01 [1080p]",
+    ],
+)
+def test_no_season_metadata_before_delimited_episode_keeps_clean_series_title(tmp_path, release_title):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (1, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 1
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 01" / "Example Show - S01E01 - Subs [1080p].mkv"
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show Part 2 of 2 [01][1080p]",
+        "[Subs] Example Show Cour 2 of 2 [01][1080p]",
+        "[Subs] Example Show Part 2 of 2 - 01 [1080p]",
+    ],
+)
+def test_no_season_subdivision_of_total_before_real_episode_keeps_clean_series_title(tmp_path, release_title):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (1, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 1
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 01" / "Example Show - S01E01 - Subs [1080p].mkv"
+
+
+@pytest.mark.parametrize(
+    ("release_title", "expected_series"),
+    [
+        ("[Subs] Part 2 Show - 01 [1080p]", "Part 2 Show"),
+        ("[Subs] Example Part 2 - 01 [1080p]", "Example Part 2"),
+        ("[Subs] Example Part 2 [01][1080p]", "Example Part 2"),
+        ("[Subs] Example Show Part 2 - 01 [1080p]", "Example Show Part 2"),
+        ("[Subs] Example Show Cour 2 - 01 [1080p]", "Example Show Cour 2"),
+        ("[Subs] Vol. 1 Show - 01 [1080p]", "Vol 1 Show"),
+        ("[Subs] Disc 1 Show - 01 [1080p]", "Disc 1 Show"),
+        ("[Subs] Example Vol. 1 - 01 [1080p]", "Example Vol 1"),
+        ("[Subs] Example Vol. 1 [01][1080p]", "Example Vol 1"),
+        ("[Subs] Example Show Vol. 1 [01][1080p]", "Example Show Vol 1"),
+        ("[Subs] Example Disc 1 - 01 [1080p]", "Example Disc 1"),
+        ("[Subs] Example Disc 1 [01][1080p]", "Example Disc 1"),
+        ("[Subs] Example Show Disc 1 - 01 [1080p]", "Example Show Disc 1"),
+    ],
+)
+def test_no_season_part_title_words_are_preserved_without_metadata_context(
+    tmp_path, release_title, expected_series
+):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (1, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 1
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == (
+        library / expected_series / "Season 01" / f"{expected_series} - S01E01 - Subs [1080p].mkv"
+    )
+
+
+@pytest.mark.parametrize(
+    ("release_title", "expected_series"),
+    [
+        ("[Subs] Example Part 2 Season 2 [01][1080p]", "Example Part 2"),
+        ("[Subs] Example Cour 2 Season 2 [01][1080p]", "Example Cour 2"),
+        ("[Subs] Example Part 2 S02E01 [1080p]", "Example Part 2"),
+    ],
+)
+def test_subdivision_before_season_context_keeps_clean_series_title(tmp_path, release_title, expected_series):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == (
+        library / expected_series / "Season 02" / f"{expected_series} - S02E01 - Subs [1080p].mkv"
+    )
+
+
+@pytest.mark.parametrize(
+    ("release_title", "expected_series"),
+    [
+        ("[Subs] Part 2 Show Season 2 [01][1080p]", "Part 2 Show"),
+        ("[Subs] Cour 2 Show Season 2 [01][1080p]", "Cour 2 Show"),
+        ("[Subs] Part 2 of 3 Show Season 2 [01][1080p]", "Part 2 of 3 Show"),
+        ("[Subs] Example Show Season 2 Part 2 Show [01][1080p]", "Example Show Part 2 Show"),
+    ],
+)
+def test_season_context_subdivision_title_words_are_preserved_without_metadata_context(
+    tmp_path, release_title, expected_series
+):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == (
+        library / expected_series / "Season 02" / f"{expected_series} - S02E01 - Subs [1080p].mkv"
+    )
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show Season 2 Part 2 - 01 [1080p]",
+        "[Subs] Example Show S02 Cour 2 - 01 [1080p]",
+        "[Subs] Example Show Season 2 Vol. 3 - 01 [1080p]",
+        "[Subs] Example Show Season 2 Disc 1 - 01 [1080p]",
+    ],
+)
+def test_season_context_metadata_before_delimited_episode_keeps_clean_series_title(tmp_path, release_title):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 02" / "Example Show - S02E01 - Subs [1080p].mkv"
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show Season 2 Part 2 01-12 [1080p]",
+        "[Subs] Example Show Season 2 Cour 2 01-12 [1080p]",
+        "[Subs] Example Show Season 2 Vol. 3 01-12 [1080p]",
+        "[Subs] Example Show Season 2 Part 2 01-02 [1080p]",
+    ],
+)
+def test_season_context_metadata_before_unbracketed_range_preserves_season_and_unsorts(
+    tmp_path, release_title
+):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, None)
+    assert result.actions[0].status == "unsorted"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode is None
+    assert result.actions[0].destination_path == library / "_Unsorted" / "Example Show" / "Example Show.mkv"
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show Season 2 [E01] - The Beginning [1080p]",
+        "[Subs] Example Show Season 2 [01] - The Beginning [1080p]",
+        "[Subs] Example Show 第2季 [第01話] - 开始 [1080p]",
+    ],
+)
+def test_bracketed_episode_marker_with_following_title_keeps_clean_series_title(tmp_path, release_title):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 02" / "Example Show - S02E01 - Subs [1080p].mkv"
 
 
 def test_bangumi_chinese_title_uses_flat_series_directory(tmp_path):
@@ -519,6 +838,10 @@ def test_single_character_metadata_release_group_does_not_remove_title_initial(
             "Anime - S01E01 - Subs [1080p].mkv",
         ),
         (
+            "[Subs] Example Show - 01 - 02 [1080p]",
+            "Example Show - S01E01 - Subs [1080p].mkv",
+        ),
+        (
             "[Subs] Example Show Season 2 - 01 [1080p]",
             "Example Show - S02E01 - Subs [1080p].mkv",
         ),
@@ -556,7 +879,10 @@ def test_numeric_title_tokens_are_not_parsed_as_episode_numbers(tmp_path, releas
     )
 
     expected_series_dir = expected_destination.split(" - S", 1)[0]
-    expected_season = int(expected_destination.split(" - S", 1)[1][:2])
+    expected_marker = expected_destination.split(" - S", 1)[1].split(" - ", 1)[0]
+    expected_season = int(expected_marker[:2])
+    expected_episode = int(expected_marker[3:])
+    assert _parse_episode(release_title) == (expected_season, expected_episode)
     assert result.actions[0].destination_path == library / expected_series_dir / f"Season {expected_season:02d}" / expected_destination
 
 
@@ -575,6 +901,264 @@ def test_season_only_release_notation_sets_season_and_removes_season_from_title(
     )
 
     assert result.actions[0].destination_path == library / "Dr STONE" / "Season 04" / "Dr STONE - S04E01 - ANi [1080P].mkv"
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show Season 2 01 of 12 [1080p]",
+        "[Subs] Example Show Season 2 - 01 of 12 [1080p]",
+        "[Subs] Example Show Season 2 [01 of 12][1080p]",
+    ],
+)
+def test_season_context_episode_of_total_removes_full_suffix_from_title(tmp_path, release_title):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 02" / "Example Show - S02E01 - Subs [1080p].mkv"
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show Season 2 - 01 - The Beginning [1080p]",
+        "[Subs] Example Show 2nd Season - 01 - The Beginning [1080p]",
+        "[Subs] Example Show 第2季 - 01 - 开始 [1080p]",
+    ],
+)
+def test_season_context_delimited_episode_title_cleanup(tmp_path, release_title):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 02" / "Example Show - S02E01 - Subs [1080p].mkv"
+
+
+@pytest.mark.parametrize(
+    ("release_title", "expected_parse", "expected_series"),
+    [
+        ("[Subs] Example Show Season 2 E01 - The Beginning [1080p]", (2, 1), "Example Show"),
+        ("[Subs] Example Show 2nd Season E01 - The Beginning [1080p]", (2, 1), "Example Show"),
+        ("[Subs] Example Show 第2季 E01 - 开始 [1080p]", (2, 1), "Example Show"),
+        ("[Subs] Example Show S02E01 - The Beginning [1080p]", (2, 1), "Example Show"),
+        ("[Subs] Example Show S02-E01-The Beginning [1080p]", (2, 1), "Example Show"),
+        ("[Subs] Foo 第2季 第03話 - 开始 [1080p]", (2, 3), "Foo"),
+    ],
+)
+def test_episode_marker_delimited_title_cleanup_keeps_clean_series_title(
+    tmp_path, release_title, expected_parse, expected_series
+):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    expected_season, expected_episode = expected_parse
+    assert _parse_episode(release_title) == expected_parse
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == expected_season
+    assert result.actions[0].episode == expected_episode
+    assert result.actions[0].destination_path == (
+        library
+        / expected_series
+        / f"Season {expected_season:02d}"
+        / f"{expected_series} - S{expected_season:02d}E{expected_episode:02d} - Subs [1080p].mkv"
+    )
+
+
+def test_season_marker_before_quality_bracket_uses_trailing_episode_number(tmp_path):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+    release_title = "[ANi] Dr.STONE S04 [1080P] - 01"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (4, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 4
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Dr STONE" / "Season 04" / "Dr STONE - S04E01 - ANi [1080P].mkv"
+
+
+def test_season_word_marker_accepts_e_prefixed_episode(tmp_path):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+    release_title = "[Subs] Example Show Season 2 E01 [1080p]"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 02" / "Example Show - S02E01 - Subs [1080p].mkv"
+
+
+def test_cjk_season_marker_accepts_e_prefixed_episode(tmp_path):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+    release_title = "[Subs] Example Show 第2季 E01 [1080p]"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 02" / "Example Show - S02E01 - Subs [1080p].mkv"
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show 第2季 第01話 [1080p]",
+        "[Subs] Example Show 第2期 第01集 [1080p]",
+        "[Subs] Example Show 第2季 01話 [1080p]",
+        "[Subs] Example Show 2nd Season E01 [1080p]",
+        "[Subs] Example Show 2nd Season - E01 [1080p]",
+        "[Subs] Example Show Season 2 E01 - 12 [1080p]",
+        "[Subs] Example Show 2nd Season E01 - 12 [1080p]",
+        "[Subs] Example Show S02 - E01 - 12 [1080p]",
+        "[Subs] Example Show Season 2 [E01 - 12][1080p]",
+    ],
+)
+def test_season_context_accepts_cjk_and_e_prefixed_episode_markers(tmp_path, release_title):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 02" / "Example Show - S02E01 - Subs [1080p].mkv"
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show S02 E01-E12 [1080p]",
+        "[Subs] Example Show Season 2 E01 - E12 [1080p]",
+        "[Subs] Example Show S02 E01 - E12 [1080p]",
+    ],
+)
+def test_season_context_e_prefixed_episode_ranges_on_both_ends_are_unsorted(tmp_path, release_title):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, None)
+    assert result.actions[0].status == "unsorted"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode is None
+    assert result.actions[0].destination_path == library / "_Unsorted" / "Example Show" / "Example Show.mkv"
+
+
+def test_no_season_bracketed_explicit_episode_range_uses_explicit_marker_start(tmp_path):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+    release_title = "[Subs] Example Show [E01 - 12][1080p]"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (1, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 1
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 01" / "Example Show - S01E01 - Subs [1080p].mkv"
+
+
+@pytest.mark.parametrize(
+    "release_title",
+    [
+        "[Subs] Example Show Season 2 [01][1080p]",
+        "[Subs] Example Show S02 [01][1080p]",
+        "[Subs] Example Show 第2季 [01][1080p]",
+        "[Subs] Example Show Season 2 [E01][1080p]",
+        "[Subs] Example Show 第2季 [第01話][1080p]",
+        "[Subs] Example Show 第2季 [01話][1080p]",
+        "[Subs] Example Show Season 2 Part 2 [01][1080p]",
+        "[Subs] Example Show Season 2 Cour 2 [01][1080p]",
+        "[Subs] Example Show Season 2 Part 2 of 2 [01][1080p]",
+        "[Subs] Example Show Season 2 [Part 2 of 2] [01][1080p]",
+        "[Subs] Example Show Season 2 Cour 2 of 2 [01][1080p]",
+        "[Subs] Example Show Season 2 [Cour 2 of 2] [01][1080p]",
+    ],
+)
+def test_season_context_before_bracketed_episode_sets_season(tmp_path, release_title):
+    source = tmp_path / "downloads" / "release.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(release_title) == (2, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].season == 2
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == library / "Example Show" / "Season 02" / "Example Show - S02E01 - Subs [1080p].mkv"
 
 
 @pytest.mark.parametrize("source_name", ["download-123.mkv", "[Other] Anime - 02 [1080p].mkv", "[Subs] Anime - 02 [1080p].mkv"])

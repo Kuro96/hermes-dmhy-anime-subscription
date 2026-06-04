@@ -209,45 +209,32 @@ def _with_bangumi_title(info: _EpisodeInfo, bangumi_lookup: BangumiLookup | None
 
 
 def _parse_episode(text: str) -> tuple[int, int | None]:
+    e_prefixed_season_range = _season_context_e_prefixed_episode_range(text)
+    if e_prefixed_season_range is not None:
+        return e_prefixed_season_range, None
     season_episode = re.search(r"\bS(?P<season>\d{1,2})\s*E(?P<episode>\d{1,3})\b", text, flags=re.IGNORECASE)
     if season_episode:
         return int(season_episode.group("season")), int(season_episode.group("episode"))
+    season_range = _season_context_episode_range(text)
+    if season_range is not None:
+        return season_range, None
     season_then_episode = re.search(
-        r"\bS(?P<season>\d{1,2})\b[\s_.-]+(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
+        r"\bS(?P<season>\d{1,2})\b[\s_.-]+(?:E\s*)?(?P<episode>\d{1,3})(?:v\d+)?(?:\s*[-_]\s*\d{1,3})?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
         text,
         flags=re.IGNORECASE,
     )
     if season_then_episode:
         return int(season_then_episode.group("season")), int(season_then_episode.group("episode"))
     for pattern in (
-        r"\bSeason\s*(?P<season>\d{1,2})\b[\s_.-]+(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
-        r"\b(?P<season>\d{1,2})(?:st|nd|rd|th)\s+Season\b[\s_.-]+(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
-        r"第\s*(?P<season>\d{1,2})\s*[季期][\s_.-]*(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
+        r"\bSeason\s*(?P<season>\d{1,2})\b[\s_.-]+(?:E\s*)?(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
+        r"\b(?P<season>\d{1,2})(?:st|nd|rd|th)\s+Season\b[\s_.-]+(?:E\s*)?(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
+        r"第\s*(?P<season>\d{1,2})\s*[季期][\s_.-]*(?:E\s*)?(?:第\s*)?(?P<episode>\d{1,3})(?:v\d+)?(?:\s*[話话集]|(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b)))",
     ):
         season_word_episode = re.search(pattern, text, flags=re.IGNORECASE)
         if season_word_episode:
             return int(season_word_episode.group("season")), int(season_word_episode.group("episode"))
-    episode_of_total = re.search(
-        r"(?:^|[\s_\-\[\(]|(?<!\d)\.)(?P<episode>\d{1,3})(?:v\d+)?\s+of\s+\d{1,3}(?=$|[\s_\-\]\)]|\.(?!\d))",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if episode_of_total:
-        return DEFAULT_SEASON, int(episode_of_total.group("episode"))
-    episode_range = re.search(
-        r"(?:^|[\s_\-\[\(]|(?<!\d)\.)(?P<episode>\d{1,3})(?:v\d+)?[-_]\d{1,3}(?=$|[\s_\-\]\)]|\.(?!\d))",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if episode_range:
-        return DEFAULT_SEASON, int(episode_range.group("episode"))
-    bracketed_episode = re.search(
-        r"\[(?P<episode>\d{1,3})(?:v\d+)?(?:\s+(?:(?:480|720|1080|2160)p|4k)\b[^\]]*)?\]",
-        text,
-        flags=re.IGNORECASE,
-    )
-    if bracketed_episode:
-        return DEFAULT_SEASON, int(bracketed_episode.group("episode"))
+    season_only_season = None
+    season_only_span = None
     for pattern in (
         r"\bS(?P<season>\d{1,2})\b",
         r"\bSeason\s*(?P<season>\d{1,2})\b",
@@ -256,11 +243,96 @@ def _parse_episode(text: str) -> tuple[int, int | None]:
     ):
         season_only = re.search(pattern, text, flags=re.IGNORECASE)
         if season_only:
-            return int(season_only.group("season")), None
+            season_only_season = int(season_only.group("season"))
+            season_only_span = season_only.span()
+            break
+    explicit_bracketed_episode_range = re.search(
+        r"\[\s*E\s*(?P<episode>\d{1,3})(?:v\d+)?\s*[-_]\s*\d{1,3}\s*\]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if explicit_bracketed_episode_range:
+        season = season_only_season if season_only_season is not None else DEFAULT_SEASON
+        return season, int(explicit_bracketed_episode_range.group("episode"))
+    episode_of_total_text = text
+    if season_only_span is not None:
+        _, end = season_only_span
+        episode_of_total_text = _remove_season_subdivision_metadata(text[end:])
+        episode_of_total_text = re.sub(
+            r"\[[^\]]*\b(?:parts?|cours?)\.?\s*\d{1,3}\b(?:\s+of\s+\d{1,3}\b)?[^\]]*\]",
+            " ",
+            episode_of_total_text,
+            flags=re.IGNORECASE,
+        )
+    else:
+        episode_of_total_text = _remove_explicit_subdivision_of_total_metadata(episode_of_total_text)
+    episode_of_total = re.search(
+        r"(?:^|[\s_\-\[\(]|(?<!\d)\.)(?P<episode>\d{1,3})(?:v\d+)?\s+of\s+\d{1,3}(?=$|[\s_\-\]\)]|\.(?!\d))",
+        episode_of_total_text,
+        flags=re.IGNORECASE,
+    )
+    if episode_of_total:
+        season = season_only_season if season_only_season is not None else DEFAULT_SEASON
+        return season, int(episode_of_total.group("episode"))
+    episode_range_text = text
+    if season_only_span is not None:
+        _, end = season_only_span
+        episode_range_text = text[end:]
+        episode_range_text = re.sub(
+            r"\[[^\]]*\b(?:parts?|cours?)\.?\s*\d{1,3}\b[^\]]*\]",
+            " ",
+            episode_range_text,
+            flags=re.IGNORECASE,
+        )
+        episode_range_text = re.sub(
+            r"\[[^\]]*(?:\b\d{1,3}\s*(?:discs?|vol(?:ume)?s?)\b|\b(?:discs?|vol(?:ume)?s?)\.?\s*\d{1,3}\b)[^\]]*\]",
+            " ",
+            episode_range_text,
+            flags=re.IGNORECASE,
+        )
+    episode_range_text = _remove_season_subdivision_metadata(episode_range_text)
+    episode_range_text = _remove_unbracketed_disc_volume_metadata(episode_range_text, preserve_short_title_tokens=False)
+    episode_range = re.search(
+        r"(?:^|[\s_\-\[\(]|(?<!\d)\.)(?P<episode>\d{1,3})(?:v\d+)?\s*(?P<separator>[-_])\s*(?P<end>\d{1,3})(?=$|[\s_\-\]\)]|\.(?!\d))",
+        episode_range_text,
+        flags=re.IGNORECASE,
+    )
+    if episode_range:
+        if season_only_season is not None:
+            return season_only_season, None
+        if not re.search(r"01\s*[-_]\s*02", episode_range.group(0)):
+            return DEFAULT_SEASON, None
+        return DEFAULT_SEASON, int(episode_range.group("episode"))
+    bracketed_episode = re.search(
+        r"\[(?:E\s*)?(?:第\s*)?(?P<episode>\d{1,3})(?:v\d+)?(?:\s*[話话集])?(?:\s+(?:(?:480|720|1080|2160)p|4k)\b[^\]]*)?\]",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if bracketed_episode:
+        season = season_only_season if season_only_season is not None else DEFAULT_SEASON
+        return season, int(bracketed_episode.group("episode"))
+    candidate_text = text
+    if season_only_span is not None:
+        _, end = season_only_span
+        candidate_text = text[end:]
+        candidate_text = re.sub(
+            r"\[[^\]]*(?:\b\d{1,3}\s*(?:discs?|vol(?:ume)?s?)\b|\b(?:discs?|vol(?:ume)?s?)\.?\s*\d{1,3}\b)[^\]]*\]",
+            " ",
+            candidate_text,
+            flags=re.IGNORECASE,
+        )
+        candidate_text = re.sub(
+            r"\[[^\]]*\b(?:parts?|cours?)\.?\s*\d{1,3}\b[^\]]*\]",
+            " ",
+            candidate_text,
+            flags=re.IGNORECASE,
+        )
+        candidate_text = _remove_season_subdivision_metadata(candidate_text)
+        candidate_text = _remove_unbracketed_disc_volume_metadata(candidate_text, preserve_short_title_tokens=False)
     candidate_text = re.sub(
         r"\[[^\]]*\b(?:(?:480|720|1080|2160)p|4k)\b[^\]]*\]",
         " ",
-        text,
+        candidate_text,
         flags=re.IGNORECASE,
     )
     candidate_text = re.sub(
@@ -269,6 +341,9 @@ def _parse_episode(text: str) -> tuple[int, int | None]:
         candidate_text,
         flags=re.IGNORECASE,
     )
+    if season_only_span is None:
+        candidate_text = _remove_explicit_subdivision_of_total_metadata(candidate_text)
+        candidate_text = _remove_unbracketed_disc_volume_metadata(candidate_text)
     candidates = list(
         re.finditer(
             r"(?:^|[\s_\-\[\(]|(?<!\d)\.)(?P<episode>\d{1,3})(?:v\d+)?(?=$|[\s_\-\]\)]|\.(?!\d)|\.(?=(?:(?:480|720|1080|2160)p|4k)\b))",
@@ -277,7 +352,10 @@ def _parse_episode(text: str) -> tuple[int, int | None]:
         )
     )
     if candidates:
-        return DEFAULT_SEASON, int(candidates[-1].group("episode"))
+        season = season_only_season if season_only_season is not None else DEFAULT_SEASON
+        return season, int(candidates[-1].group("episode"))
+    if season_only_season is not None:
+        return season_only_season, None
     return DEFAULT_SEASON, None
 
 
@@ -291,23 +369,75 @@ def _parse_quality(text: str) -> str | None:
     return match.group("quality") if match else None
 
 
+def _season_context_episode_range(text: str) -> int | None:
+    range_suffix = r"[\[\(]?\s*\d{1,3}(?:v\d+)?\s*[-_]\s*\d{1,3}\s*[\]\)]?(?=$|[\s_\-\]\)]|\.(?!\d))"
+    for pattern in (
+        rf"\bS(?P<season>\d{{1,2}})\b[\s_.-]+{range_suffix}",
+        rf"\bSeason\s*(?P<season>\d{{1,2}})\b[\s_.-]+{range_suffix}",
+        rf"\b(?P<season>\d{{1,2}})(?:st|nd|rd|th)\s+Season\b[\s_.-]+{range_suffix}",
+        rf"第\s*(?P<season>\d{{1,2}})\s*[季期][\s_.-]*(?:第\s*)?{range_suffix}",
+    ):
+        season_range = re.search(pattern, text, flags=re.IGNORECASE)
+        if season_range:
+            return int(season_range.group("season"))
+    return None
+
+
+def _season_context_e_prefixed_episode_range(text: str) -> int | None:
+    range_suffix = r"E\s*\d{1,3}(?:v\d+)?\s*[-_]\s*E\s*\d{1,3}(?=$|[\s_\-\]\)]|\.(?!\d))"
+    for pattern in (
+        rf"\bS(?P<season>\d{{1,2}})\b[\s_.-]+{range_suffix}",
+        rf"\bSeason\s*(?P<season>\d{{1,2}})\b[\s_.-]+{range_suffix}",
+        rf"\b(?P<season>\d{{1,2}})(?:st|nd|rd|th)\s+Season\b[\s_.-]+{range_suffix}",
+        rf"第\s*(?P<season>\d{{1,2}})\s*[季期][\s_.-]*{range_suffix}",
+    ):
+        season_range = re.search(pattern, text, flags=re.IGNORECASE)
+        if season_range:
+            return int(season_range.group("season"))
+    return None
+
+
 def _series_title(title: str, stem: str, release_group: str, quality: str, episode: int | None) -> str:
     value = title or stem
+    had_season_context = _has_season_context(value)
+    had_bracketed_episode_marker = _has_bracketed_episode_marker(value, episode)
     leading_group_match = re.match(r"^\s*\[(?P<group>[^\]]+)\]", value)
     had_leading_release_group_marker = bool(
         leading_group_match and leading_group_match.group("group").casefold() == release_group.casefold()
     )
+    value = _remove_delimited_episode_title_suffix(value, episode)
     value = re.sub(r"^\s*\[[^\]]+\]\s*", "", value)
     value = re.sub(r"\[[^\]]*\]", " ", value)
+    if had_season_context:
+        value = _remove_season_subdivision_metadata(_remove_subdivision_after_season_marker(value))
+    else:
+        value = _remove_no_season_subdivision_metadata(value)
+    value = _remove_delimited_episode_title_suffix(value, episode)
+    value = re.sub(r"\bS\d{1,2}\b[\s_.-]+E\s*\d{1,3}(?:v\d+)?\s*[-_]\s*E\s*\d{1,3}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bSeason\s*\d{1,2}\b[\s_.-]+E\s*\d{1,3}(?:v\d+)?\s*[-_]\s*E\s*\d{1,3}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)\s+Season\b[\s_.-]+E\s*\d{1,3}(?:v\d+)?\s*[-_]\s*E\s*\d{1,3}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"第\s*\d{1,2}\s*[季期][\s_.-]*E\s*\d{1,3}(?:v\d+)?\s*[-_]\s*E\s*\d{1,3}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bS\d{1,2}\b[\s_.-]+E\s*\d{1,3}(?:v\d+)?(?:\s*[-_]\s*\d{1,3})?\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\bS\d{1,2}\s*E\d{1,3}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bSeason\s*\d{1,2}\b[\s_.-]+(?:E\s*)?\d{1,3}(?:v\d+)?\s+of\s+\d{1,3}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)\s+Season\b[\s_.-]+(?:E\s*)?\d{1,3}(?:v\d+)?\s+of\s+\d{1,3}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"第\s*\d{1,2}\s*[季期][\s_.-]*(?:E\s*)?(?:第\s*)?\d{1,3}(?:v\d+)?\s+of\s+\d{1,3}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\bSeason\s*\d{1,2}\b[\s_.-]+(?:E\s*)?\d{1,3}(?:v\d+)?\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)\s+Season\b[\s_.-]+(?:E\s*)?\d{1,3}(?:v\d+)?\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"第\s*\d{1,2}\s*[季期][\s_.-]*(?:E\s*)?(?:第\s*)?\d{1,3}(?:v\d+)?\s*[話话集]?", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\bS\d{1,2}\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\bSeason\s*\d{1,2}\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)\s+Season\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"第\s*\d{1,2}\s*[季期]", " ", value)
+    if had_season_context:
+        value = _remove_unbracketed_disc_volume_metadata(value)
+    else:
+        value = _remove_bd_disc_volume_metadata(value)
     if quality:
         value = _remove_title_token(value, quality)
     value = _remove_delimited_episode_title_suffix(value, episode)
-    value = _remove_trailing_episode_token(value)
+    if not had_bracketed_episode_marker:
+        value = _remove_trailing_episode_token(value)
     if release_group and not had_leading_release_group_marker:
         if len(release_group.strip()) > 1:
             value = _remove_leading_title_token(value, release_group)
@@ -315,14 +445,44 @@ def _series_title(title: str, stem: str, release_group: str, quality: str, episo
     return re.sub(r"[\s_.-]+", " ", value).strip()
 
 
+def _has_bracketed_episode_marker(value: str, episode: int | None) -> bool:
+    if episode is None:
+        return False
+    return bool(
+        re.search(
+            rf"\[(?:E\s*)?(?:第\s*)?0*{episode}(?:v\d+)?(?:\s*[話话集])?(?:\s+(?:(?:480|720|1080|2160)p|4k)\b[^\]]*)?\]",
+            value,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
 def _remove_delimited_episode_title_suffix(value: str, episode: int | None) -> str:
     if episode is None:
         return value
     episode_pattern = rf"0*{episode}(?:v\d+)?"
     delimiter = r"[\s_.-]*[-_.][\s_.-]*"
+    episode_marker_pattern = (
+        rf"(?:\bS\d{{1,2}}\s*[-_.]?\s*E\s*{episode_pattern}\b"
+        rf"|\bSeason\s*\d{{1,2}}\b[\s_.-]+E\s*{episode_pattern}\b"
+        rf"|\b\d{{1,2}}(?:st|nd|rd|th)\s+Season\b[\s_.-]+E\s*{episode_pattern}\b"
+        rf"|第\s*\d{{1,2}}\s*[季期][\s_.-]*(?:E\s*)?(?:第\s*)?{episode_pattern}\s*[話话集]?"
+        rf"|\[(?:E\s*)?(?:第\s*)?{episode_pattern}(?:\s*[話话集])?\])"
+    )
+    value = re.sub(
+        rf"(?P<prefix>.*?)(?:^|[\s_.-]+){episode_marker_pattern}{delimiter}\S.*$",
+        lambda match: match.group("prefix"),
+        value,
+        flags=re.IGNORECASE,
+    )
+    def remove_delimited_suffix(match: re.Match[str]) -> str:
+        if re.search(r"(?:^|[\s_.-])(?:discs?|vol(?:ume)?s?)\.?\s*$", match.group("prefix"), flags=re.IGNORECASE):
+            return match.group(0)
+        return match.group("prefix")
+
     return re.sub(
         rf"(?P<prefix>.*?){delimiter}{episode_pattern}{delimiter}\S.*$",
-        lambda match: match.group("prefix"),
+        remove_delimited_suffix,
         value,
         flags=re.IGNORECASE,
     )
@@ -335,13 +495,92 @@ def _remove_trailing_episode_token(value: str) -> str:
         value,
         flags=re.IGNORECASE,
     )
+    def remove_trailing_range(match: re.Match[str]) -> str:
+        if re.search(r"(?:^|[\s_.-])(?:parts?|cours?|discs?|vol(?:ume)?s?)\.?\s*$", value[: match.start()], flags=re.IGNORECASE):
+            return match.group(0)
+        if int(match.group("start")) <= int(match.group("end")):
+            return match.group("prefix")
+        return match.group(0)
+
     value = re.sub(
-        r"(?P<prefix>^|[\s_.-])\d{1,3}(?:v\d+)?[-_]\d{1,3}[\s_.-]*$",
-        lambda match: match.group("prefix"),
+        r"(?P<prefix>^|[\s_.-])(?P<start>\d{1,3})(?:v\d+)?\s*[-_]\s*(?P<end>\d{1,3})[\s_.-]*$",
+        remove_trailing_range,
         value,
         flags=re.IGNORECASE,
     )
-    return re.sub(r"(?P<prefix>^|[\s_.-])\d{1,3}(?:v\d+)?[\s_.-]*$", lambda match: match.group("prefix"), value)
+    def remove_trailing_number(match: re.Match[str]) -> str:
+        if re.search(r"(?:^|[\s_.-])(?:parts?|cours?|discs?|vol(?:ume)?s?)\.?\s*$", value[: match.start()], flags=re.IGNORECASE):
+            return match.group(0)
+        return match.group("prefix")
+
+    return re.sub(r"(?P<prefix>^|[\s_.-])\d{1,3}(?:v\d+)?[\s_.-]*$", remove_trailing_number, value)
+
+
+def _remove_unbracketed_disc_volume_metadata(value: str, *, preserve_short_title_tokens: bool = True) -> str:
+    def remove_clear_disc_volume(match: re.Match[str]) -> str:
+        if preserve_short_title_tokens and not match.group("bd"):
+            title_words_before_marker = re.findall(r"[A-Za-z0-9]+", value[: match.start()])
+            if len(title_words_before_marker) < 2:
+                return match.group(0)
+        return " "
+
+    return re.sub(
+        r"(?:^|[\s_.-])(?P<bd>BD[\s_.-]+)?(?:\d{1,3}\s*(?:discs?|vol(?:ume)?s?)\b|(?:discs?|vol(?:ume)?s?)\.?\s*\d{1,3}\b)(?=\s*$|[\s_.-]+(?:\d{1,3}\b|E\s*\d{1,3}\b|\[[^\]]*\]))",
+        remove_clear_disc_volume,
+        value,
+        flags=re.IGNORECASE,
+    )
+
+
+def _remove_bd_disc_volume_metadata(value: str) -> str:
+    return re.sub(
+        r"(?:^|[\s_.-])BD[\s_.-]+(?:\d{1,3}\s*(?:discs?|vol(?:ume)?s?)\b|(?:discs?|vol(?:ume)?s?)\.?\s*\d{1,3}\b)(?=\s*$|[\s_.-]+(?:\d{1,3}\b|E\s*\d{1,3}\b|\[[^\]]*\]))",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+
+def _remove_explicit_subdivision_of_total_metadata(value: str) -> str:
+    return re.sub(
+        r"(?:^|[\s_.-])(?:parts?|cours?)\.?\s*\d{1,3}\b\s+of\s+\d{1,3}\b(?=\s*$|\s*(?:[\[\(]|[-_.]\s*)?(?:E\s*)?\d{1,3}\b)",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+
+def _remove_no_season_subdivision_metadata(value: str) -> str:
+    value = _remove_explicit_subdivision_of_total_metadata(value)
+    return re.sub(
+        r"(?:^|[\s_.-])(?:parts?|cours?)\.?\s*\d{1,3}\b\s+of\s+\d{1,3}\b(?=\s*(?:[\[\(]|[-_.]\s*)?(?:E\s*)?\d{1,3}\b)",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+
+def _remove_season_subdivision_metadata(value: str) -> str:
+    metadata_context = r"(?=\s*$|\s*\[[^\]]*\]|\s*(?:[-_.]\s*)?(?:E\s*)?\d{1,3}\b)"
+    return re.sub(
+        rf"(?:^|[\s_.-])(?:parts?|cours?)\.?\s*\d{{1,3}}\b(?:\s+of\s+\d{{1,3}}\b)?{metadata_context}",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
+
+
+def _remove_subdivision_after_season_marker(value: str) -> str:
+    metadata_context = r"(?=\s*$|\s*\[[^\]]*\]|\s*(?:[-_.]\s*)?(?:E\s*)?\d{1,3}\b)"
+    metadata_suffix = rf"(?:parts?|cours?)\.?\s*\d{{1,3}}\b(?:\s+of\s+\d{{1,3}}\b)?{metadata_context}"
+    for pattern in (
+        rf"(?P<season>\bS\d{{1,2}}\b)[\s_.-]+{metadata_suffix}",
+        rf"(?P<season>\bSeason\s*\d{{1,2}}\b)[\s_.-]+{metadata_suffix}",
+        rf"(?P<season>\b\d{{1,2}}(?:st|nd|rd|th)\s+Season\b)[\s_.-]+{metadata_suffix}",
+        rf"(?P<season>第\s*\d{{1,2}}\s*[季期])[\s_.-]*{metadata_suffix}",
+    ):
+        value = re.sub(pattern, lambda match: match.group("season"), value, flags=re.IGNORECASE)
+    return value
 
 
 def _remove_leading_title_token(value: str, token: str) -> str:
