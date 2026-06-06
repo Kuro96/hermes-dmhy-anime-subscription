@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_dmhy_anime_subscription.dmhy import DmhyRssClient, build_rss_url, extract_info_hash, parse_rss_file
+from hermes_dmhy_anime_subscription.dmhy import DmhyRssClient, build_rss_url, extract_info_hash, parse_rss, parse_rss_file
 
 
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "dmhy"
@@ -72,6 +72,88 @@ def test_missing_enclosure_is_recoverable_and_skipped():
     assert error.recoverable is True
     assert error.guid == "missing-enclosure-guid"
     assert "missing an enclosure magnet" in error.message
+
+
+def test_non_actionable_manga_empty_enclosure_is_skipped_without_error():
+    result = parse_rss(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Keyword RSS</title>
+    <item>
+      <title>[OldMangaGroup] Example Manga Chapter 12</title>
+      <link>https://share.dmhy.org/topics/view/123456_example_manga.html</link>
+      <pubDate>Sun, 24 May 2026 10:30:00 +0000</pubDate>
+      <description>Old manga entry from a keyword feed</description>
+      <author>OldMangaGroup</author>
+      <category>漫畫</category>
+      <guid>https://share.dmhy.org/topics/view/123456_example_manga.html</guid>
+      <enclosure url="" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="keyword",
+    )
+
+    assert result.items == ()
+    assert result.errors == ()
+
+
+def test_anime_empty_enclosure_url_remains_parse_error():
+    result = parse_rss(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>[ExampleSub] Example Anime - 02 [1080p][CHS]</title>
+      <category>動畫</category>
+      <guid>anime-empty-enclosure-guid</guid>
+      <enclosure url="" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="anime",
+    )
+
+    assert result.items == ()
+    assert len(result.errors) == 1
+    error = result.errors[0]
+    assert error.guid == "anime-empty-enclosure-guid"
+    assert "missing an enclosure magnet" in error.message
+
+
+def test_manga_enclosure_without_url_attribute_remains_parse_error():
+    result = parse_rss(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>[OldMangaGroup] Example Manga Chapter 13</title>
+      <category>漫畫</category>
+      <guid>manga-missing-url-attribute-guid</guid>
+      <enclosure type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="keyword",
+    )
+
+    assert result.items == ()
+    assert len(result.errors) == 1
+    error = result.errors[0]
+    assert error.guid == "manga-missing-url-attribute-guid"
+    assert "missing an enclosure magnet" in error.message
+
+
+def test_invalid_rss_xml_remains_parse_error():
+    result = parse_rss("<rss><channel><item></channel></rss>")
+
+    assert result.items == ()
+    assert len(result.errors) == 1
+    assert "Invalid RSS XML" in result.errors[0].message
 
 
 def test_client_wraps_url_builder_and_parser():

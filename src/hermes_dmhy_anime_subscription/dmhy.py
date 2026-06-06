@@ -132,6 +132,8 @@ def _parse_item(item_element: ET.Element, index: int, source_feed: str | None) -
     info_hash = extract_info_hash(magnet_uri)
     error: RssParseError | None = None
     if not magnet_uri or not info_hash:
+        if _is_non_actionable_empty_manga_item(item_element, category):
+            return None, None
         error = RssParseError(
             message="RSS item is missing an enclosure magnet URI with a btih infohash",
             item_index=index,
@@ -188,6 +190,15 @@ def _enclosure_url(item_element: ET.Element) -> str | None:
     if value and value.strip():
         return value.strip()
     return None
+
+
+def _is_non_actionable_empty_manga_item(item_element: ET.Element, category: str | None) -> bool:
+    if (category or "").strip() != "漫畫":
+        return False
+    enclosure = _first_child(item_element, "enclosure")
+    if enclosure is None:
+        return False
+    return "url" in enclosure.attrib and not enclosure.attrib["url"].strip()
 
 
 def _text(element: ET.Element, child_name: str) -> str | None:
