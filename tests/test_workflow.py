@@ -156,6 +156,41 @@ def test_run_once_dry_run_is_repeatable_and_does_not_create_state(tmp_path):
     assert not state_path.exists()
 
 
+def test_run_once_dry_run_skips_non_actionable_manga_empty_enclosure_without_parse_error(tmp_path):
+    config_path = _config(tmp_path)
+    fake_qbit = FakeQbittorrentClient()
+    manga_rss = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>DMHY Keyword RSS</title>
+    <item>
+      <title>[OldMangaGroup] Example Manga Chapter 12</title>
+      <link>https://share.dmhy.org/topics/view/123456_example_manga.html</link>
+      <pubDate>Sun, 24 May 2026 10:30:00 +0000</pubDate>
+      <description>Old manga entry from a keyword feed</description>
+      <author>OldMangaGroup</author>
+      <category>漫畫</category>
+      <guid>https://share.dmhy.org/topics/view/123456_example_manga.html</guid>
+      <enclosure url="" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+"""
+
+    result = run_once(
+        config_path,
+        dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: manga_rss,
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ),
+    )
+
+    assert result.parsed_items == 0
+    assert result.parse_errors == 0
+    assert result.candidates == ()
+    assert fake_qbit.submissions == []
+
+
 def test_run_once_does_not_mark_unmatched_global_feed_item_seen_before_specialized_feed(
     tmp_path, monkeypatch
 ):
