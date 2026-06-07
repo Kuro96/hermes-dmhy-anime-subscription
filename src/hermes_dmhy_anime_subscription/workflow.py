@@ -1445,11 +1445,11 @@ def _dry_run_organizer_config(config: PluginConfig) -> PluginConfig:
 def _bangumi_lookup(
     deps: WorkflowDependencies, *, dry_run: bool, metadata: dict[str, object] | None = None
 ) -> BangumiLookup | None:
-    fallback_lookup = deps.bangumi_lookup
+    if deps.bangumi_lookup is not None:
+        return deps.bangumi_lookup
     if dry_run:
-        return fallback_lookup
-    if fallback_lookup is None and not dry_run:
-        fallback_lookup = lookup_chinese_title
+        return None
+    fallback_lookup = lookup_chinese_title
     subject_id = _integral_episode((metadata or {}).get("bangumi_subject_id"))
     if subject_id is None:
         return fallback_lookup

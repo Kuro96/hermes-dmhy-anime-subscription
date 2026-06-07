@@ -2741,6 +2741,56 @@ def test_monitor_once_prefers_bangumi_subject_id_title_for_default_organizer(
     assert result.organizer_results[0].actions[0].destination_path.parts[-2] == "躲在超市后门抽烟的两人"
 
 
+def test_monitor_once_injected_bangumi_lookup_wins_over_subject_id_fetch(
+    tmp_path, monkeypatch
+):
+    config_path = _config(tmp_path, organizer_mode="move")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    source = tmp_path / "downloads" / "[64bitsub][Super no Ura de Yani Suu Futari][03][1920x1080][AVC_AAC][CHT].mp4"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-monitor",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+            metadata={
+                "title": "[喵萌奶茶屋&LoliHouse] 超市后门吸烟的两人 / Super no Ura de Yani Suu Futari - 03 [WebRip 1080p HEVC-10bit AAC][简繁日内封字幕]",
+                "bangumi_subject_id": 571784,
+            },
+        )
+    calls = []
+    monkeypatch.setattr(
+        workflow,
+        "fetch_subject_title",
+        lambda subject_id: pytest.fail(f"unexpected live Bangumi title fetch: {subject_id}"),
+    )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+                name=source.name,
+                state="uploading",
+                progress=1.0,
+                content_path=str(source),
+                completed_at=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            bangumi_lookup=lambda title: calls.append(title) or "调用方指定标题"
+        ),
+    )
+
+    assert calls == ["超市后门吸烟的两人"]
+    assert result.organizer_results[0].actions[0].destination_path is not None
+    assert result.organizer_results[0].actions[0].destination_path.parts[-2] == "调用方指定标题"
+
+
 def test_plan_completed_dry_run_without_dependency_suppresses_default_bangumi_lookup(
     tmp_path, monkeypatch
 ):
