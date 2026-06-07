@@ -2,12 +2,13 @@
 
 from .config import ConfigError, PluginConfig, load_config, parse_config
 from .plugin import PLUGIN_METADATA, register
-from .workflow import list_state, monitor_once, organize_once, retry_failed_item, run_once, scheduler_tick, validate_config
+from .workflow import audit_ingestion, list_state, monitor_once, organize_once, retry_failed_item, run_once, scheduler_tick, validate_config
 
 __all__ = [
     "ConfigError",
     "PLUGIN_METADATA",
     "PluginConfig",
+    "audit_ingestion",
     "list_state",
     "load_config",
     "monitor_once",

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .monitor import OrganizerInput, TorrentSnapshot
 from .workflow import (
+    audit_ingestion,
     list_state,
     monitor_once,
     organize_once,
@@ -28,6 +29,7 @@ TOOL_NAMES = (
     "dmhy.organize_once",
     "dmhy.list_state",
     "dmhy.list_failures",
+    "dmhy.audit_ingestion",
     "dmhy.retry_failed_item",
 )
 
@@ -56,6 +58,7 @@ def register(ctx):
     _register_tool(ctx, "dmhy.organize_once", organize_once)
     _register_tool(ctx, "dmhy.list_state", _list_state)
     _register_tool(ctx, "dmhy.list_failures", _list_failures)
+    _register_tool(ctx, "dmhy.audit_ingestion", audit_ingestion)
     _register_tool(ctx, "dmhy.retry_failed_item", retry_failed_item)
     _register_hook(ctx, "dmhy.schedule_tick", scheduler_tick)
     from .cli import main

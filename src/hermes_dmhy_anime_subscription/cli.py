@@ -11,6 +11,7 @@ from typing import Sequence
 from .monitor import OrganizerInput, TorrentSnapshot
 from .workflow import (
     WorkflowDependencies,
+    audit_ingestion,
     list_state,
     monitor_once,
     organize_once,
@@ -80,6 +81,10 @@ def build_parser() -> argparse.ArgumentParser:
     failures = subcommands.add_parser("failures")
     failures.add_argument("--config", required=True)
     failures.set_defaults(func=_failures)
+
+    audit = subcommands.add_parser("audit-ingestion")
+    audit.add_argument("--config", required=True)
+    audit.set_defaults(func=_audit_ingestion)
 
     retry = subcommands.add_parser("retry-failed")
     retry.add_argument("--config", required=True)
@@ -224,6 +229,12 @@ def _failures(args: argparse.Namespace) -> int:
             default=str,
         )
     )
+    return 0
+
+
+def _audit_ingestion(args: argparse.Namespace) -> int:
+    result = audit_ingestion(args.config)
+    print(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
     return 0
 
 
