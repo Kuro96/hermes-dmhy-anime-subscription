@@ -17,6 +17,7 @@ from .bangumi import (
     BangumiSubjectEpisodes,
     fetch_subject_cover_url,
     fetch_subject_main_episodes,
+    fetch_subject_title,
     lookup_chinese_title,
 )
 from .config import ConfigError, OrganizerConfig, PluginConfig, load_config
@@ -470,10 +471,11 @@ def monitor_once(
         if deps.telegram_factory
         else TelegramNotifier(config.telegram)
     )
-    bangumi_lookup = _bangumi_lookup(deps, dry_run=dry_run)
     organizer_runner = deps.organizer_runner or (
         lambda organizer_input, loaded_config: organize_media(
-            organizer_input, loaded_config.organizer, bangumi_lookup=bangumi_lookup
+            organizer_input,
+            loaded_config.organizer,
+            bangumi_lookup=_bangumi_lookup(deps, dry_run=dry_run, metadata=organizer_input.metadata),
         )
     )
     with _monitor_state(config, dry_run=dry_run) as state:
@@ -682,10 +684,11 @@ def organize_once(
         if deps.webhook_factory
         else WebhookNotifier(config.webhook)
     )
-    bangumi_lookup = _bangumi_lookup(deps, dry_run=dry_run)
     organizer_runner = deps.organizer_runner or (
         lambda item, loaded_config: organize_media(
-            item, loaded_config.organizer, bangumi_lookup=bangumi_lookup
+            item,
+            loaded_config.organizer,
+            bangumi_lookup=_bangumi_lookup(deps, dry_run=dry_run, metadata=item.metadata),
         )
     )
     effective_config = _dry_run_organizer_config(config) if dry_run else config
@@ -714,10 +717,11 @@ def plan_completed_dry_run(
         if deps.webhook_factory
         else WebhookNotifier(config.webhook)
     )
-    bangumi_lookup = _bangumi_lookup(deps, dry_run=True)
     organizer_runner = deps.organizer_runner or (
         lambda organizer_input, loaded_config: organize_media(
-            organizer_input, loaded_config.organizer, bangumi_lookup=bangumi_lookup
+            organizer_input,
+            loaded_config.organizer,
+            bangumi_lookup=_bangumi_lookup(deps, dry_run=True, metadata=organizer_input.metadata),
         )
     )
     snapshots = _completed_snapshots_from_run_result(run_result, source_path)
@@ -1230,13 +1234,21 @@ def _dry_run_organizer_config(config: PluginConfig) -> PluginConfig:
 
 
 def _bangumi_lookup(
-    deps: WorkflowDependencies, *, dry_run: bool
+    deps: WorkflowDependencies, *, dry_run: bool, metadata: dict[str, object] | None = None
 ) -> BangumiLookup | None:
-    if deps.bangumi_lookup is not None:
-        return deps.bangumi_lookup
+    fallback_lookup = deps.bangumi_lookup
     if dry_run:
-        return None
-    return lookup_chinese_title
+        return fallback_lookup
+    if fallback_lookup is None and not dry_run:
+        fallback_lookup = lookup_chinese_title
+    subject_id = _integral_episode((metadata or {}).get("bangumi_subject_id"))
+    if subject_id is None:
+        return fallback_lookup
+
+    def lookup(title: str) -> str | None:
+        return fetch_subject_title(subject_id) or (fallback_lookup(title) if fallback_lookup is not None else None)
+
+    return lookup
 
 
 def _state_path(config: PluginConfig, *, dry_run: bool) -> str | Path:

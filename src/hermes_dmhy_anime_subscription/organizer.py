@@ -365,7 +365,7 @@ def _parse_release_group(text: str) -> str | None:
 
 
 def _parse_quality(text: str) -> str | None:
-    match = re.search(r"\b(?P<quality>(?:480|720|1080|2160)p|4k)\b", text, flags=re.IGNORECASE)
+    match = re.search(r"\b(?P<quality>(?:480|720|1080|2160)p|4k|\d{3,4}x\d{3,4})\b", text, flags=re.IGNORECASE)
     return match.group("quality") if match else None
 
 
@@ -399,6 +399,7 @@ def _season_context_e_prefixed_episode_range(text: str) -> int | None:
 
 def _series_title(title: str, stem: str, release_group: str, quality: str, episode: int | None) -> str:
     value = title or stem
+    bracket_series_title = _bracket_series_title(value, release_group, episode)
     had_season_context = _has_season_context(value)
     had_bracketed_episode_marker = _has_bracketed_episode_marker(value, episode)
     leading_group_match = re.match(r"^\s*\[(?P<group>[^\]]+)\]", value)
@@ -442,7 +443,39 @@ def _series_title(title: str, stem: str, release_group: str, quality: str, episo
         if len(release_group.strip()) > 1:
             value = _remove_leading_title_token(value, release_group)
             value = _remove_delimited_title_token(value, release_group)
-    return re.sub(r"[\s_.-]+", " ", value).strip()
+    series_title = re.sub(r"[\s_.-]+", " ", value).strip()
+    return series_title or bracket_series_title
+
+
+def _bracket_series_title(value: str, release_group: str, episode: int | None) -> str:
+    stripped = value.strip()
+    matches = list(re.finditer(r"\[([^\]]+)\]", stripped))
+    if len(matches) < 2 or matches[0].start() != 0 or stripped[matches[0].end() : matches[1].start()].strip():
+        return ""
+    for index, match in enumerate(matches):
+        content = match.group(1).strip()
+        if not content:
+            continue
+        if index == 0 and release_group and content.casefold() == release_group.casefold():
+            continue
+        if _is_spec_bracket(content, episode):
+            continue
+        return content
+    return ""
+
+
+def _is_spec_bracket(content: str, episode: int | None) -> bool:
+    normalized = content.strip().casefold()
+    if not normalized:
+        return True
+    if episode is not None and re.fullmatch(rf"(?:e\s*)?0*{episode}(?:v\d+)?(?:\s*[話话集])?", normalized, flags=re.IGNORECASE):
+        return True
+    return bool(
+        re.fullmatch(r"(?:e\s*)?\d{1,3}(?:v\d+)?(?:\s*[話话集])?", normalized, flags=re.IGNORECASE)
+        or re.search(r"\b(?:(?:480|720|1080|2160)p|4k|\d{3,4}x\d{3,4})\b", normalized, flags=re.IGNORECASE)
+        or re.search(r"\b(?:aac|flac|opus|dts|ac3|eac3|avc|hevc|h264|h265|x264|x265|hi10p|mp4|mkv)\b", normalized, flags=re.IGNORECASE)
+        or normalized in {"chs", "cht", "gb", "big5", "sc", "tc", "简", "繁", "简繁", "字幕", "sub", "subs"}
+    )
 
 
 def _has_bracketed_episode_marker(value: str, episode: int | None) -> bool:
@@ -717,6 +750,8 @@ def _season_directory(library_root: Path, info: _EpisodeInfo) -> Path:
 
 
 def _plan_action(source: Path, destination: Path, library_root: Path, mode: OrganizerMode, media_type: str, info: _EpisodeInfo) -> OrganizerAction:
+    if not info.flat_library and info.library_title == "Unknown Series":
+        return OrganizerAction(source, None, "unsorted", media_type, "Series title could not be parsed", info.episode, info.season)
     if not _is_relative_to(destination.resolve(strict=False), library_root):
         return OrganizerAction(source, None, "conflict", media_type, "Destination escaped library root", info.episode, info.season)
     if destination.exists():

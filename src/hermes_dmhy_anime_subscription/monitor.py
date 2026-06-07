@@ -252,7 +252,7 @@ def _mark_completed(
     organizer_input = OrganizerInput(
         job_id=job["job_id"],
         torrent_hash=snapshot.torrent_hash.lower(),
-        title=snapshot.name,
+        title=str(metadata.get("title") or snapshot.name),
         source_path=source_path,
         completed_at=completed_at,
         metadata={**metadata, "qbittorrent_state": snapshot.state, **dict(snapshot.metadata)},

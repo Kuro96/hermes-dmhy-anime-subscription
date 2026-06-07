@@ -28,6 +28,37 @@ def test_dry_run_plans_media_server_layout_without_mutating_source(tmp_path):
     assert not destination.exists()
 
 
+def test_consecutive_bracket_release_uses_second_bracket_as_series_title(tmp_path):
+    source = tmp_path / "downloads" / "[64bitsub][Super no Ura de Yani Suu Futari][03][1920x1080][AVC_AAC][CHT].mp4"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=source.stem),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    destination = library / "Super no Ura de Yani Suu Futari" / "Season 01" / "Super no Ura de Yani Suu Futari - S01E03 - 64bitsub [1920x1080].mp4"
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].destination_path == destination
+
+
+def test_bangumi_lookup_can_keep_supermarket_yani_out_of_unknown_series(tmp_path):
+    source = tmp_path / "downloads" / "[64bitsub][Super no Ura de Yani Suu Futari][03][1920x1080][AVC_AAC][CHT].mp4"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=source.stem, metadata={"bangumi_subject_id": 571784}),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+        bangumi_lookup=lambda title: "躲在超市后门抽烟的两人",
+    )
+
+    assert result.actions[0].destination_path == library / "躲在超市后门抽烟的两人" / "Super no Ura de Yani Suu Futari - S01E03 - 64bitsub [1920x1080].mp4"
+
+
 def test_apply_copies_single_file_under_library_root(tmp_path):
     source = tmp_path / "downloads" / "[Subs] Example Show - 02 [720p].mp4"
     source.parent.mkdir()
@@ -1289,6 +1320,23 @@ def test_unparsed_episode_falls_back_to_unsorted_with_warning_event(tmp_path):
 
     assert result.actions[0].status == "unsorted"
     assert result.actions[0].destination_path == library / "_Unsorted" / "Example OVA" / "Example OVA.mkv"
+    assert result.events[0].event_type == "organizer_unsorted"
+
+
+def test_unknown_series_destination_is_not_planned_or_applied(tmp_path):
+    source = tmp_path / "downloads" / "[01][1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title="[01][1080p]"),
+        OrganizerConfig(mode=OrganizerMode.APPLY, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert result.actions[0].status == "unsorted"
+    assert result.actions[0].destination_path is None
+    assert not (library / "Unknown Series").exists()
     assert result.events[0].event_type == "organizer_unsorted"
 
 

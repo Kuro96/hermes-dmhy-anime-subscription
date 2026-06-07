@@ -93,6 +93,25 @@ def test_completed_torrent_creates_organizer_input_once(tmp_path):
     assert second.events == ()
 
 
+def test_completed_torrent_organizer_input_prefers_job_metadata_title(tmp_path):
+    snapshot = TorrentSnapshot(
+        torrent_hash="HASHDONE",
+        name="[64bitsub][Super no Ura de Yani Suu Futari][03][1920x1080][AVC_AAC][CHT].mp4",
+        state="uploading",
+        progress=1.0,
+        save_path="/downloads/anime",
+        content_path="/downloads/anime/[64bitsub][Super no Ura de Yani Suu Futari][03][1920x1080][AVC_AAC][CHT].mp4",
+    )
+    release_title = "[喵萌奶茶屋&LoliHouse] 超市后门吸烟的两人 / Super no Ura de Yani Suu Futari - 03 [WebRip 1080p HEVC-10bit AAC][简繁日内封字幕]"
+
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        _insert_job(state, "job-done", "HASHDONE", metadata={"title": release_title, "bangumi_subject_id": 571784})
+        result = monitor_downloads(state, (snapshot,), _retry(), now=NOW)
+
+    assert result.organizer_inputs[0].title == release_title
+    assert result.organizer_inputs[0].metadata["content_path"] == snapshot.content_path
+
+
 def test_completed_torrent_without_content_path_does_not_organize_save_path(tmp_path):
     snapshot = TorrentSnapshot(
         torrent_hash="HASHDONE",
@@ -165,13 +184,13 @@ def test_missing_expected_job_and_deleted_snapshot_use_retry_policy(tmp_path):
     assert deleted.events[0].event_type == "download_retry_waiting"
 
 
-def _insert_job(state: SubscriptionState, job_id: str, torrent_hash: str) -> None:
+def _insert_job(state: SubscriptionState, job_id: str, torrent_hash: str, metadata=None) -> None:
     state.upsert_job(
         job_id,
         dedupe_key=f"infohash:{torrent_hash.lower()}",
         status=DownloadJobStatus.SUBMITTED,
         torrent_hash=torrent_hash,
-        metadata={"title": job_id},
+        metadata=metadata or {"title": job_id},
     )
 
 
