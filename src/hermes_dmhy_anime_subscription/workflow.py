@@ -1845,9 +1845,8 @@ def _record_organizer_actions(
     telegram_enabled: bool,
 ) -> None:
     for action in result.actions:
-        if action.destination_path is None:
-            continue
         outcome = "dry-run" if dry_run else action.status
+        destination_path = str(action.destination_path) if action.destination_path else None
         job = state.get_job(result.job_id)
         if job is not None:
             metadata = dict(job["metadata"])
@@ -1887,7 +1886,7 @@ def _record_organizer_actions(
             result.job_id,
             outcome,
             str(action.source_path),
-            str(action.destination_path),
+            destination_path,
         )
 
 

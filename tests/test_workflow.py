@@ -3168,6 +3168,71 @@ def test_monitor_once_dry_run_forces_organizer_planning_and_leaves_state_unchang
         assert state.list_organizer_outcomes() == ()
 
 
+def test_monitor_once_records_no_destination_unsorted_as_organizer_intervention(
+    tmp_path, monkeypatch
+):
+    config_path = _config(tmp_path, organizer_mode="move")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+    source = tmp_path / "downloads" / "[01][1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-unsorted-no-destination",
+            dedupe_key=f"infohash:{torrent_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=torrent_hash,
+            metadata={"title": "[01][1080p]"},
+        )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash=torrent_hash,
+                name="[01][1080p]",
+                state="uploading",
+                progress=1.0,
+                content_path=str(source),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            organizer_runner=lambda item, config: OrganizerResult(
+                item.job_id,
+                config.organizer.mode,
+                (
+                    OrganizerAction(
+                        Path(item.source_path),
+                        None,
+                        "unsorted",
+                        "video",
+                        "Series title could not be parsed",
+                    ),
+                ),
+            )
+        ),
+    )
+
+    assert result.organizer_results[0].actions[0].destination_path is None
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-unsorted-no-destination")
+        assert job is not None
+        assert job["organizer_outcome"] == "unsorted"
+        outcomes = state.list_organizer_outcomes()
+        assert len(outcomes) == 1
+        assert outcomes[0]["outcome"] == "unsorted"
+        assert outcomes[0]["source_path"] == str(source)
+        assert outcomes[0]["destination_path"] is None
+
+    audit = audit_ingestion(config_path)
+    categories = [finding["category"] for finding in audit["findings"]]
+    assert categories.count("organizer_intervention") == 1
+    assert "organizer_pending" not in categories
+
+
 def test_monitor_once_apply_without_organize_does_not_persist_planning_state_and_later_organizes(
     tmp_path, monkeypatch
 ):
