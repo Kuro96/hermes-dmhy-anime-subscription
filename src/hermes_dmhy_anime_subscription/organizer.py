@@ -455,16 +455,19 @@ def _bracket_series_title(value: str, release_group: str, episode: int | None) -
     matches = list(re.finditer(r"\[([^\]]+)\]", stripped))
     if len(matches) < 2 or matches[0].start() != 0 or stripped[matches[0].end() : matches[1].start()].strip():
         return ""
+    first_bracket_fallback = ""
     for index, match in enumerate(matches):
         content = match.group(1).strip()
         if not content:
             continue
         if index == 0 and release_group and content.casefold() == release_group.casefold():
+            if not _is_spec_bracket(content, episode):
+                first_bracket_fallback = content
             continue
         if _is_spec_bracket(content, episode):
             continue
         return content
-    return ""
+    return first_bracket_fallback
 
 
 def _is_spec_bracket(content: str, episode: int | None) -> bool:

@@ -44,6 +44,24 @@ def test_consecutive_bracket_release_uses_second_bracket_as_series_title(tmp_pat
     assert result.actions[0].destination_path == destination
 
 
+def test_consecutive_bracket_title_without_release_group_uses_first_bracket_as_series_title(tmp_path):
+    source = tmp_path / "downloads" / "[Example Show][01][1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=source.stem),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    destination = library / "Example Show" / "Season 01" / "Example Show - S01E01 - Example Show [1080p].mkv"
+    assert _parse_episode(source.stem) == (1, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].episode == 1
+    assert result.actions[0].destination_path == destination
+
+
 def test_consecutive_bracket_release_preserves_numeric_series_title(tmp_path):
     source = tmp_path / "downloads" / "[Subs][86][01][1080p].mkv"
     source.parent.mkdir()
