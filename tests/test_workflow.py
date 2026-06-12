@@ -20,6 +20,7 @@ from hermes_dmhy_anime_subscription.state import SubscriptionState
 from hermes_dmhy_anime_subscription.telegram import TelegramDeliveryPlan, TelegramDispatchResult
 from hermes_dmhy_anime_subscription.workflow import (
     WorkflowDependencies,
+    audit_ingestion,
     ensure_apply_safe,
     list_state,
     monitor_once,
@@ -2692,6 +2693,104 @@ def test_monitor_once_production_injects_bangumi_lookup_into_default_organizer(
     )
 
 
+def test_monitor_once_prefers_bangumi_subject_id_title_for_default_organizer(
+    tmp_path, monkeypatch
+):
+    config_path = _config(tmp_path, organizer_mode="move")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    source = tmp_path / "downloads" / "[64bitsub][Super no Ura de Yani Suu Futari][03][1920x1080][AVC_AAC][CHT].mp4"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-monitor",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+            metadata={
+                "title": "[喵萌奶茶屋&LoliHouse] 超市后门吸烟的两人 / Super no Ura de Yani Suu Futari - 03 [WebRip 1080p HEVC-10bit AAC][简繁日内封字幕]",
+                "bangumi_subject_id": 571784,
+            },
+        )
+    subject_ids = []
+    monkeypatch.setattr(
+        workflow,
+        "fetch_subject_title",
+        lambda subject_id: subject_ids.append(subject_id) or "躲在超市后门抽烟的两人",
+    )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+                name=source.name,
+                state="uploading",
+                progress=1.0,
+                content_path=str(source),
+                completed_at=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
+            ),
+        ),
+        dry_run=False,
+    )
+
+    assert subject_ids == [571784]
+    assert result.organizer_results[0].actions[0].destination_path is not None
+    assert "Unknown Series" not in str(result.organizer_results[0].actions[0].destination_path)
+    assert result.organizer_results[0].actions[0].destination_path.parts[-2] == "躲在超市后门抽烟的两人"
+
+
+def test_monitor_once_injected_bangumi_lookup_wins_over_subject_id_fetch(
+    tmp_path, monkeypatch
+):
+    config_path = _config(tmp_path, organizer_mode="move")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    source = tmp_path / "downloads" / "[64bitsub][Super no Ura de Yani Suu Futari][03][1920x1080][AVC_AAC][CHT].mp4"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-monitor",
+            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+            metadata={
+                "title": "[喵萌奶茶屋&LoliHouse] 超市后门吸烟的两人 / Super no Ura de Yani Suu Futari - 03 [WebRip 1080p HEVC-10bit AAC][简繁日内封字幕]",
+                "bangumi_subject_id": 571784,
+            },
+        )
+    calls = []
+    monkeypatch.setattr(
+        workflow,
+        "fetch_subject_title",
+        lambda subject_id: pytest.fail(f"unexpected live Bangumi title fetch: {subject_id}"),
+    )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
+                name=source.name,
+                state="uploading",
+                progress=1.0,
+                content_path=str(source),
+                completed_at=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            bangumi_lookup=lambda title: calls.append(title) or "调用方指定标题"
+        ),
+    )
+
+    assert calls == ["超市后门吸烟的两人"]
+    assert result.organizer_results[0].actions[0].destination_path is not None
+    assert result.organizer_results[0].actions[0].destination_path.parts[-2] == "调用方指定标题"
+
+
 def test_plan_completed_dry_run_without_dependency_suppresses_default_bangumi_lookup(
     tmp_path, monkeypatch
 ):
@@ -3067,6 +3166,71 @@ def test_monitor_once_dry_run_forces_organizer_planning_and_leaves_state_unchang
         assert job["status"] == DownloadJobStatus.SUBMITTED.value
         assert job["organizer_outcome"] is None
         assert state.list_organizer_outcomes() == ()
+
+
+def test_monitor_once_records_no_destination_unsorted_as_organizer_intervention(
+    tmp_path, monkeypatch
+):
+    config_path = _config(tmp_path, organizer_mode="move")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+    source = tmp_path / "downloads" / "[01][1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-unsorted-no-destination",
+            dedupe_key=f"infohash:{torrent_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=torrent_hash,
+            metadata={"title": "[01][1080p]"},
+        )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash=torrent_hash,
+                name="[01][1080p]",
+                state="uploading",
+                progress=1.0,
+                content_path=str(source),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            organizer_runner=lambda item, config: OrganizerResult(
+                item.job_id,
+                config.organizer.mode,
+                (
+                    OrganizerAction(
+                        Path(item.source_path),
+                        None,
+                        "unsorted",
+                        "video",
+                        "Series title could not be parsed",
+                    ),
+                ),
+            )
+        ),
+    )
+
+    assert result.organizer_results[0].actions[0].destination_path is None
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-unsorted-no-destination")
+        assert job is not None
+        assert job["organizer_outcome"] == "unsorted"
+        outcomes = state.list_organizer_outcomes()
+        assert len(outcomes) == 1
+        assert outcomes[0]["outcome"] == "unsorted"
+        assert outcomes[0]["source_path"] == str(source)
+        assert outcomes[0]["destination_path"] is None
+
+    audit = audit_ingestion(config_path)
+    categories = [finding["category"] for finding in audit["findings"]]
+    assert categories.count("organizer_intervention") == 1
+    assert "organizer_pending" not in categories
 
 
 def test_monitor_once_apply_without_organize_does_not_persist_planning_state_and_later_organizes(
@@ -4197,6 +4361,154 @@ def test_plugin_list_state_returns_json_serializable_dict(tmp_path):
     assert result["processed"][0]["job_id"] == "job-done"
     assert result["all_failures"][0]["message"] == "webhook timed out"
     assert result["archived_rules"][0]["rule_name"] == "example-show"
+    json.dumps(result)
+
+
+def test_audit_ingestion_reports_unknown_series_missing_destination_and_stale_state(tmp_path):
+    config_path = _config(tmp_path)
+    source = tmp_path / "downloads" / "missing-source.mkv"
+    stale_source = tmp_path / "downloads" / "stale-source.mkv"
+    stale_destination = tmp_path / "library" / "Example Anime" / "Season 01" / "Example Anime - S01E01.mkv"
+    stale_destination.parent.mkdir(parents=True)
+    stale_destination.write_bytes(b"video")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-unknown",
+            dedupe_key="infohash:unknown",
+            status=DownloadJobStatus.COMPLETED,
+            organizer_outcome="applied",
+            metadata={
+                "rule_name": "supermarket-yani",
+                "title": "[Subs] [01][1080p]",
+                "episode": 1,
+                "content_path": str(source),
+            },
+        )
+        state.record_organizer_outcome(
+            "job-unknown",
+            "applied",
+            str(source),
+            str(tmp_path / "library" / "Unknown Series" / "Season 01" / "Unknown Series - S01E01.mkv"),
+        )
+        state.upsert_job(
+            "job-stale",
+            dedupe_key="infohash:stale",
+            status=DownloadJobStatus.COMPLETED,
+            organizer_outcome="applied",
+            metadata={"title": "Example Anime", "episode": 1, "content_path": str(stale_source)},
+        )
+        state.record_organizer_outcome(
+            "job-stale", "applied", str(stale_source), str(stale_destination)
+        )
+
+    result = audit_ingestion(config_path)
+
+    findings = result["findings"]
+    assert isinstance(findings, list)
+    summary = result["summary"]
+    assert isinstance(summary, dict)
+    categories = {finding["category"] for finding in findings}
+    assert "unknown_series_destination" in categories
+    assert "missing_applied_destination" in categories
+    assert "stale_state" in categories
+    assert summary["ok"] is False
+    assert summary["needs_intervention"] is True
+    assert summary["counts_by_category"]["stale_state"] == 1
+    unknown = next(
+        finding
+        for finding in findings
+        if finding["category"] == "unknown_series_destination"
+    )
+    assert unknown["rule_name"] == "supermarket-yani"
+    assert unknown["reason"] == "unknown_series_destination_path"
+    assert all("needs_intervention" in finding for finding in result["findings"])
+    json.dumps(result)
+
+
+def test_audit_ingestion_reports_pending_and_intervention_outcomes(tmp_path):
+    config_path = _config(tmp_path)
+    source = tmp_path / "downloads" / "Example Anime - 02.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-pending-organizer",
+            dedupe_key="infohash:pending-organizer",
+            status=DownloadJobStatus.COMPLETED,
+            metadata={"title": "Example Anime", "episode": 2, "content_path": str(source)},
+        )
+        state.upsert_job(
+            "job-conflict",
+            dedupe_key="infohash:conflict",
+            status=DownloadJobStatus.COMPLETED,
+            organizer_outcome="conflict",
+            metadata={"title": "Example Anime", "episode": 3, "content_path": str(source)},
+        )
+        state.record_organizer_outcome("job-conflict", "conflict", str(source), None)
+        state.upsert_job(
+            "job-unsorted",
+            dedupe_key="infohash:unsorted",
+            status=DownloadJobStatus.COMPLETED,
+            organizer_outcome="unsorted",
+            metadata={"title": "Example Anime", "episode": 4, "content_path": str(source)},
+        )
+        state.record_organizer_outcome("job-unsorted", "unsorted", str(source), None)
+
+    result = audit_ingestion(config_path)
+
+    categories = [finding["category"] for finding in result["findings"]]
+    assert categories.count("organizer_pending") == 1
+    assert categories.count("organizer_intervention") == 2
+    assert result["summary"]["needs_intervention"] is True
+
+
+def test_audit_ingestion_no_findings_ok_and_missing_state_does_not_create_db(tmp_path):
+    config_path = _config(tmp_path)
+
+    result = audit_ingestion(config_path)
+
+    assert result == {
+        "schema_version": 1,
+        "summary": {
+            "ok": True,
+            "total_findings": 0,
+            "counts_by_severity": {},
+            "counts_by_category": {},
+            "needs_intervention": False,
+        },
+        "findings": [],
+    }
+    assert not (tmp_path / "state.sqlite3").exists()
+
+
+def test_cli_audit_ingestion_prints_json_and_exits_zero_with_findings(tmp_path, capsys):
+    config_path = _config(tmp_path)
+    source = tmp_path / "downloads" / "Example Anime - 05.mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-cli-audit",
+            dedupe_key="infohash:cli-audit",
+            status=DownloadJobStatus.COMPLETED,
+            metadata={"title": "Example Anime", "episode": 5, "content_path": str(source)},
+        )
+
+    assert cli.main(["audit-ingestion", "--config", str(config_path)]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["summary"]["ok"] is False
+    assert output["findings"][0]["job_id"] == "job-cli-audit"
+
+
+def test_plugin_audit_ingestion_returns_json_serializable_dict(tmp_path):
+    config_path = _config(tmp_path)
+    ctx = RecordingContext()
+    register(ctx)
+
+    result = ctx.tools["dmhy.audit_ingestion"](str(config_path))
+
+    assert result["summary"]["ok"] is True
     json.dumps(result)
 
 

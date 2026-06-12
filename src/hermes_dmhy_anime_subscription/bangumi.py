@@ -105,6 +105,27 @@ def fetch_subject_cover_url(
     return None
 
 
+def fetch_subject_title(
+    subject_id: int,
+    *,
+    opener: Callable[..., Any] = urlopen,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> str | None:
+    request = Request(
+        f"{SUBJECT_API_URL}/{subject_id}",
+        headers={"Accept": "application/json", "User-Agent": USER_AGENT},
+        method="GET",
+    )
+    decoded = _read_json(request, opener=opener, timeout=timeout)
+    if not isinstance(decoded, dict):
+        return None
+    for key in ("name_cn", "name"):
+        value = decoded.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
 def _fetch_subject_eps(subject_id: int, *, opener: Callable[..., Any], timeout: float) -> int:
     request = Request(
         f"{SUBJECT_API_URL}/{subject_id}",

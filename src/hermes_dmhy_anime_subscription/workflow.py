@@ -17,6 +17,7 @@ from .bangumi import (
     BangumiSubjectEpisodes,
     fetch_subject_cover_url,
     fetch_subject_main_episodes,
+    fetch_subject_title,
     lookup_chinese_title,
 )
 from .config import ConfigError, OrganizerConfig, PluginConfig, load_config
@@ -470,10 +471,11 @@ def monitor_once(
         if deps.telegram_factory
         else TelegramNotifier(config.telegram)
     )
-    bangumi_lookup = _bangumi_lookup(deps, dry_run=dry_run)
     organizer_runner = deps.organizer_runner or (
         lambda organizer_input, loaded_config: organize_media(
-            organizer_input, loaded_config.organizer, bangumi_lookup=bangumi_lookup
+            organizer_input,
+            loaded_config.organizer,
+            bangumi_lookup=_bangumi_lookup(deps, dry_run=dry_run, metadata=organizer_input.metadata),
         )
     )
     with _monitor_state(config, dry_run=dry_run) as state:
@@ -682,10 +684,11 @@ def organize_once(
         if deps.webhook_factory
         else WebhookNotifier(config.webhook)
     )
-    bangumi_lookup = _bangumi_lookup(deps, dry_run=dry_run)
     organizer_runner = deps.organizer_runner or (
         lambda item, loaded_config: organize_media(
-            item, loaded_config.organizer, bangumi_lookup=bangumi_lookup
+            item,
+            loaded_config.organizer,
+            bangumi_lookup=_bangumi_lookup(deps, dry_run=dry_run, metadata=item.metadata),
         )
     )
     effective_config = _dry_run_organizer_config(config) if dry_run else config
@@ -714,10 +717,11 @@ def plan_completed_dry_run(
         if deps.webhook_factory
         else WebhookNotifier(config.webhook)
     )
-    bangumi_lookup = _bangumi_lookup(deps, dry_run=True)
     organizer_runner = deps.organizer_runner or (
         lambda organizer_input, loaded_config: organize_media(
-            organizer_input, loaded_config.organizer, bangumi_lookup=bangumi_lookup
+            organizer_input,
+            loaded_config.organizer,
+            bangumi_lookup=_bangumi_lookup(deps, dry_run=True, metadata=organizer_input.metadata),
         )
     )
     snapshots = _completed_snapshots_from_run_result(run_result, source_path)
@@ -819,6 +823,215 @@ def list_state(config_path: str | os.PathLike[str]) -> StateSummary:
         all_failures=failures,
         archived_rules=archived_rules,
     )
+
+
+def audit_ingestion(config_path: str | os.PathLike[str]) -> dict[str, object]:
+    config = load_config(config_path)
+    with SubscriptionState(":memory:") as state:
+        _copy_configured_state_if_available(Path(config.state.path), state)
+        jobs = state.list_jobs()
+        outcomes = state.list_organizer_outcomes()
+    findings = _audit_ingestion_findings(jobs, outcomes)
+    findings.sort(key=_audit_finding_sort_key)
+    return {
+        "schema_version": 1,
+        "summary": _audit_summary(findings),
+        "findings": findings,
+    }
+
+
+def _audit_ingestion_findings(
+    jobs: tuple[dict[str, object], ...], outcomes: tuple[dict[str, object], ...]
+) -> list[dict[str, object]]:
+    jobs_by_id = {str(job["job_id"]): job for job in jobs}
+    findings: list[dict[str, object]] = []
+    for job in jobs:
+        findings.extend(_audit_job_organization(job))
+    for outcome in outcomes:
+        job = jobs_by_id.get(str(outcome["job_id"]))
+        findings.extend(_audit_organizer_outcome(outcome, job))
+    return findings
+
+
+def _audit_job_organization(job: dict[str, object]) -> list[dict[str, object]]:
+    status = str(job.get("status") or "")
+    metadata = _job_metadata(job)
+    source_path = _metadata_text(metadata, "content_path")
+    organizer_outcome = job.get("organizer_outcome")
+    if (
+        status in {DownloadJobStatus.COMPLETED.value, DownloadJobStatus.SUBMITTED.value}
+        and source_path
+        and organizer_outcome in {None, "", "planned", "dry-run"}
+    ):
+        return [
+            _audit_finding(
+                severity="warning",
+                category="organizer_pending",
+                job=job,
+                reason="missing_applied_organizer_outcome",
+                source_path=source_path,
+                destination_path=None,
+                message=(
+                    f"Job is {status} with a content path but organizer_outcome "
+                    f"is {organizer_outcome or 'missing'}, not applied"
+                ),
+                needs_intervention=True,
+            )
+        ]
+    return []
+
+
+def _audit_organizer_outcome(
+    outcome: dict[str, object], job: dict[str, object] | None
+) -> list[dict[str, object]]:
+    findings: list[dict[str, object]] = []
+    outcome_value = str(outcome.get("outcome") or "")
+    source_path = _optional_text(outcome.get("source_path"))
+    destination_path = _optional_text(outcome.get("destination_path"))
+    if destination_path and "Unknown Series" in Path(destination_path).parts:
+        findings.append(
+            _audit_finding(
+                severity="error",
+                category="unknown_series_destination",
+                job=job,
+                outcome=outcome,
+                reason="unknown_series_destination_path",
+                source_path=source_path,
+                destination_path=destination_path,
+                message="Organizer destination path contains Unknown Series",
+                needs_intervention=True,
+            )
+        )
+    if outcome_value == "applied" and destination_path and not Path(destination_path).exists():
+        findings.append(
+            _audit_finding(
+                severity="error",
+                category="missing_applied_destination",
+                job=job,
+                outcome=outcome,
+                reason="applied_destination_missing",
+                source_path=source_path,
+                destination_path=destination_path,
+                message="Organizer outcome is applied but destination_path no longer exists",
+                needs_intervention=True,
+            )
+        )
+    if outcome_value == "applied" and destination_path and Path(destination_path).exists():
+        metadata_source = _metadata_text(_job_metadata(job), "content_path")
+        if metadata_source and not Path(metadata_source).exists():
+            findings.append(
+                _audit_finding(
+                    severity="info",
+                    category="stale_state",
+                    job=job,
+                    outcome=outcome,
+                    reason="metadata_content_path_stale",
+                    source_path=metadata_source,
+                    destination_path=destination_path,
+                    message="Job metadata content_path is missing while applied destination exists",
+                    needs_intervention=False,
+                )
+            )
+    if outcome_value in {"unsorted", "conflict"}:
+        findings.append(
+            _audit_finding(
+                severity="warning",
+                category="organizer_intervention",
+                job=job,
+                outcome=outcome,
+                reason=f"organizer_{outcome_value}",
+                source_path=source_path,
+                destination_path=destination_path,
+                message=f"Organizer outcome {outcome_value} requires user or LLM intervention",
+                needs_intervention=True,
+            )
+        )
+    return findings
+
+
+def _audit_finding(
+    *,
+    severity: str,
+    category: str,
+    job: dict[str, object] | None = None,
+    outcome: dict[str, object] | None = None,
+    reason: str,
+    source_path: str | None,
+    destination_path: str | None,
+    message: str,
+    needs_intervention: bool,
+) -> dict[str, object]:
+    metadata = _job_metadata(job)
+    return {
+        "severity": severity,
+        "category": category,
+        "job_id": _optional_text((job or outcome or {}).get("job_id")),
+        "rule_name": _metadata_text(metadata, "rule_name"),
+        "reason": reason,
+        "title": _metadata_text(metadata, "title"),
+        "episode": _metadata_scalar(metadata, "episode"),
+        "source_path": source_path,
+        "destination_path": destination_path,
+        "message": message,
+        "needs_intervention": needs_intervention,
+    }
+
+
+def _audit_summary(findings: list[dict[str, object]]) -> dict[str, object]:
+    severity_counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    for finding in findings:
+        severity = str(finding["severity"])
+        category = str(finding["category"])
+        severity_counts[severity] = severity_counts.get(severity, 0) + 1
+        category_counts[category] = category_counts.get(category, 0) + 1
+    needs_intervention = any(bool(finding["needs_intervention"]) for finding in findings)
+    return {
+        "ok": not findings,
+        "total_findings": len(findings),
+        "counts_by_severity": dict(sorted(severity_counts.items())),
+        "counts_by_category": dict(sorted(category_counts.items())),
+        "needs_intervention": needs_intervention,
+    }
+
+
+def _audit_finding_sort_key(finding: dict[str, object]) -> tuple[int, str, str, str, str, str, str]:
+    severity_rank = {"error": 0, "warning": 1, "info": 2}
+    severity = str(finding.get("severity") or "")
+    return (
+        severity_rank.get(severity, 9),
+        str(finding.get("category") or ""),
+        str(finding.get("job_id") or ""),
+        str(finding.get("rule_name") or ""),
+        str(finding.get("title") or ""),
+        str(finding.get("source_path") or ""),
+        str(finding.get("destination_path") or ""),
+    )
+
+
+def _job_metadata(job: dict[str, object] | None) -> dict[str, object]:
+    if job is None:
+        return {}
+    metadata = job.get("metadata")
+    return dict(metadata) if isinstance(metadata, dict) else {}
+
+
+def _metadata_text(metadata: dict[str, object], key: str) -> str | None:
+    return _optional_text(metadata.get(key))
+
+
+def _metadata_scalar(metadata: dict[str, object], key: str) -> str | int | float | bool | None:
+    value = metadata.get(key)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value)
+    return text or None
 
 
 def retry_failed_item(config_path: str | os.PathLike[str], job_id: str) -> RetryResult:
@@ -1230,13 +1443,21 @@ def _dry_run_organizer_config(config: PluginConfig) -> PluginConfig:
 
 
 def _bangumi_lookup(
-    deps: WorkflowDependencies, *, dry_run: bool
+    deps: WorkflowDependencies, *, dry_run: bool, metadata: dict[str, object] | None = None
 ) -> BangumiLookup | None:
     if deps.bangumi_lookup is not None:
         return deps.bangumi_lookup
     if dry_run:
         return None
-    return lookup_chinese_title
+    fallback_lookup = lookup_chinese_title
+    subject_id = _integral_episode((metadata or {}).get("bangumi_subject_id"))
+    if subject_id is None:
+        return fallback_lookup
+
+    def lookup(title: str) -> str | None:
+        return fetch_subject_title(subject_id) or (fallback_lookup(title) if fallback_lookup is not None else None)
+
+    return lookup
 
 
 def _state_path(config: PluginConfig, *, dry_run: bool) -> str | Path:
@@ -1624,9 +1845,8 @@ def _record_organizer_actions(
     telegram_enabled: bool,
 ) -> None:
     for action in result.actions:
-        if action.destination_path is None:
-            continue
         outcome = "dry-run" if dry_run else action.status
+        destination_path = str(action.destination_path) if action.destination_path else None
         job = state.get_job(result.job_id)
         if job is not None:
             metadata = dict(job["metadata"])
@@ -1666,7 +1886,7 @@ def _record_organizer_actions(
             result.job_id,
             outcome,
             str(action.source_path),
-            str(action.destination_path),
+            destination_path,
         )
 
 

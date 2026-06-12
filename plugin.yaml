@@ -9,6 +9,7 @@ provides_tools:
   - dmhy.organize_once
   - dmhy.list_state
   - dmhy.list_failures
+  - dmhy.audit_ingestion
   - dmhy.retry_failed_item
 provides_hooks:
   - dmhy.schedule_tick

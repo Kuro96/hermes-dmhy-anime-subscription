@@ -1,7 +1,7 @@
 import json
 from urllib.error import URLError
 
-from hermes_dmhy_anime_subscription.bangumi import fetch_subject_cover_url, fetch_subject_main_episodes, lookup_chinese_title
+from hermes_dmhy_anime_subscription.bangumi import fetch_subject_cover_url, fetch_subject_main_episodes, fetch_subject_title, lookup_chinese_title
 
 
 class _Response:
@@ -82,4 +82,16 @@ def test_fetch_subject_cover_url_extracts_v0_subject_image_in_preferred_order():
 
     assert result == "https://img.example.invalid/common.jpg"
     assert calls[0][0].full_url == "https://api.bgm.tv/v0/subjects/12345"
+    assert calls[0][1] == 4.5
+
+
+def test_fetch_subject_title_prefers_chinese_title_from_v0_subject():
+    calls = []
+
+    def opener(request, *, timeout):
+        calls.append((request, timeout))
+        return _Response({"name": "Super no Ura de Yani Suu Futari", "name_cn": "躲在超市后门抽烟的两人"})
+
+    assert fetch_subject_title(571784, opener=opener, timeout=4.5) == "躲在超市后门抽烟的两人"
+    assert calls[0][0].full_url == "https://api.bgm.tv/v0/subjects/571784"
     assert calls[0][1] == 4.5
