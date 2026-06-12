@@ -303,12 +303,15 @@ def _parse_episode(text: str) -> tuple[int, int | None]:
         if not re.search(r"01\s*[-_]\s*02", episode_range.group(0)):
             return DEFAULT_SEASON, None
         return DEFAULT_SEASON, int(episode_range.group("episode"))
-    bracketed_episode = re.search(
-        r"\[(?:E\s*)?(?:第\s*)?(?P<episode>\d{1,3})(?:v\d+)?(?:\s*[話话集])?(?:\s+(?:(?:480|720|1080|2160)p|4k)\b[^\]]*)?\]",
-        text,
-        flags=re.IGNORECASE,
+    bracketed_episodes = list(
+        re.finditer(
+            r"\[(?:E\s*)?(?:第\s*)?(?P<episode>\d{1,3})(?:v\d+)?(?:\s*[話话集])?(?:\s+(?:(?:480|720|1080|2160)p|4k)\b[^\]]*)?\]",
+            text,
+            flags=re.IGNORECASE,
+        )
     )
-    if bracketed_episode:
+    if bracketed_episodes:
+        bracketed_episode = bracketed_episodes[-1]
         season = season_only_season if season_only_season is not None else DEFAULT_SEASON
         return season, int(bracketed_episode.group("episode"))
     candidate_text = text
@@ -470,9 +473,10 @@ def _is_spec_bracket(content: str, episode: int | None) -> bool:
         return True
     if episode is not None and re.fullmatch(rf"(?:e\s*)?0*{episode}(?:v\d+)?(?:\s*[話话集])?", normalized, flags=re.IGNORECASE):
         return True
+    if re.fullmatch(r"(?:e\s*)?(?:第\s*)?0\d{1,2}(?:v\d+)?(?:\s*[話话集])?", normalized, flags=re.IGNORECASE):
+        return True
     return bool(
-        re.fullmatch(r"(?:e\s*)?\d{1,3}(?:v\d+)?(?:\s*[話话集])?", normalized, flags=re.IGNORECASE)
-        or re.search(r"\b(?:(?:480|720|1080|2160)p|4k|\d{3,4}x\d{3,4})\b", normalized, flags=re.IGNORECASE)
+        re.search(r"\b(?:(?:480|720|1080|2160)p|4k|\d{3,4}x\d{3,4})\b", normalized, flags=re.IGNORECASE)
         or re.search(r"\b(?:aac|flac|opus|dts|ac3|eac3|avc|hevc|h264|h265|x264|x265|hi10p|mp4|mkv)\b", normalized, flags=re.IGNORECASE)
         or normalized in {"chs", "cht", "gb", "big5", "sc", "tc", "简", "繁", "简繁", "字幕", "sub", "subs"}
     )

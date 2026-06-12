@@ -44,6 +44,41 @@ def test_consecutive_bracket_release_uses_second_bracket_as_series_title(tmp_pat
     assert result.actions[0].destination_path == destination
 
 
+def test_consecutive_bracket_release_preserves_numeric_series_title(tmp_path):
+    source = tmp_path / "downloads" / "[Subs][86][01][1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=source.stem),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    destination = library / "86" / "Season 01" / "86 - S01E01 - Subs [1080p].mkv"
+    assert _parse_episode(source.stem) == (1, 1)
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].destination_path == destination
+
+
+def test_consecutive_leading_zero_numeric_brackets_remain_unknown_series(tmp_path):
+    source = tmp_path / "downloads" / "[Subs][01][02][1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title=source.stem),
+        OrganizerConfig(mode=OrganizerMode.APPLY, library_root=library, staging_root=tmp_path / "staging"),
+    )
+
+    assert _parse_episode(source.stem) == (1, 2)
+    assert result.actions[0].status == "unsorted"
+    assert result.actions[0].destination_path is None
+    assert not (library / "Unknown Series").exists()
+    assert result.events[0].event_type == "organizer_unsorted"
+
+
 def test_bangumi_lookup_can_keep_supermarket_yani_out_of_unknown_series(tmp_path):
     source = tmp_path / "downloads" / "[64bitsub][Super no Ura de Yani Suu Futari][03][1920x1080][AVC_AAC][CHT].mp4"
     source.parent.mkdir()
