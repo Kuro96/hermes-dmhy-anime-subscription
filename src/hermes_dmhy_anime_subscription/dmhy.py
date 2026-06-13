@@ -182,6 +182,8 @@ def _is_season_pack(category: str | None, link: str, description: str | None, ti
 
 
 def _title_has_explicit_episode_marker(title: str) -> bool:
+    if _title_has_episode_range_marker(title):
+        return False
     return any(
         re.search(pattern, title, flags=re.IGNORECASE)
         for pattern in (
@@ -189,6 +191,17 @@ def _title_has_explicit_episode_marker(title: str) -> bool:
             r"第\s*\d{1,3}\s*[話话集]",
             r"(?:^|[\[\(【★\s_.-])(?:E[Pp]?\s*)?\d{1,3}(?:v\d+)?\s*(?=$|[\]\)】\s_.-]|[（(])",
         )
+    )
+
+
+def _title_has_episode_range_marker(title: str) -> bool:
+    return (
+        re.search(
+            r"(?:^|[\[\(【★\s_.-])\d{1,3}(?:v\d+)?\s*[-–—]\s*\d{1,3}(?:v\d+)?(?=$|[\]\)】\s_.-]|[（(])",
+            title,
+            flags=re.IGNORECASE,
+        )
+        is not None
     )
 
 

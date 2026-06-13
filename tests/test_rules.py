@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hermes_dmhy_anime_subscription.dmhy import parse_rss_file
+from hermes_dmhy_anime_subscription.dmhy import parse_rss, parse_rss_file
 from hermes_dmhy_anime_subscription.models import FeedItem, RuleEpisodeMode, SubscriptionRule
 from hermes_dmhy_anime_subscription.rules import dedupe_items, evaluate_rule
 
@@ -53,6 +53,39 @@ def test_allow_packs_or_pack_mode_accepts_season_pack_fixture():
 
     assert allow_packs_result.accepted is True
     assert pack_mode_result.accepted is True
+
+
+def test_pack_mode_accepts_description_only_episode_range_pack():
+    item = parse_rss(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>[Subs] Example Show 01-12 [1080p]</title>
+      <link>https://share.dmhy.org/topics/view/200112_example_show_01_12.html</link>
+      <description>BD合集</description>
+      <author>Subs</author>
+      <category>動畫</category>
+      <guid>season-pack-range-description-only</guid>
+      <enclosure url="magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345679" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="anime",
+    ).items[0]
+
+    result = evaluate_rule(
+        item,
+        SubscriptionRule(
+            name="pack-mode",
+            include_keywords=("Example Show",),
+            episode_mode=RuleEpisodeMode.PACK,
+        ),
+    )
+
+    assert item.is_season_pack is True
+    assert result.accepted is True
 
 
 def test_dedupe_accepts_first_item_and_skips_same_infohash_or_guid():
