@@ -109,7 +109,23 @@ def test_bangumi_lookup_can_keep_supermarket_yani_out_of_unknown_series(tmp_path
         bangumi_lookup=lambda title: "躲在超市后门抽烟的两人",
     )
 
-    assert result.actions[0].destination_path == library / "躲在超市后门抽烟的两人" / "Super no Ura de Yani Suu Futari - S01E03 - 64bitsub [1920x1080].mp4"
+    assert result.actions[0].destination_path == library / "躲在超市后门抽烟的两人" / "躲在超市后门抽烟的两人 - S01E03 - 64bitsub [1920x1080].mp4"
+
+
+def test_bangumi_lookup_title_is_used_for_flat_library_basename(tmp_path):
+    source = tmp_path / "downloads" / "[64bitsub][Super no Ura de Yani Suu Futari][04][1920x1080][AVC_AAC][CHT].mp4"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    library = tmp_path / "library"
+    release_title = "六四位元字幕組★躲在超市後門抽菸的兩人 Super no Ura de Yani Suu Futari★04(abema先行版)★1920x1080★AVC AAC MP4★繁體中文(重要公告)"
+
+    result = organize_media(
+        _organizer_input(source, title=release_title, metadata={"bangumi_subject_id": 571784}),
+        OrganizerConfig(mode=OrganizerMode.DRY_RUN, library_root=library, staging_root=tmp_path / "staging"),
+        bangumi_lookup=lambda title: "在超市后门吸烟的二人",
+    )
+
+    assert result.actions[0].destination_path == library / "在超市后门吸烟的二人" / "在超市后门吸烟的二人 - S01E04 - 64bitsub [1920x1080].mp4"
 
 
 def test_apply_copies_single_file_under_library_root(tmp_path):
@@ -619,8 +635,8 @@ def test_bangumi_chinese_title_uses_flat_series_directory(tmp_path):
 
     destinations = {action.destination_path for action in result.actions}
     assert destinations == {
-        library / "葬送的芙莉莲" / "Frieren Beyond Journeys End - S01E07 - Subs [1080p].mkv",
-        library / "葬送的芙莉莲" / "Frieren Beyond Journeys End - S01E07 - Subs [1080p].ass",
+        library / "葬送的芙莉莲" / "葬送的芙莉莲 - S01E07 - Subs [1080p].mkv",
+        library / "葬送的芙莉莲" / "葬送的芙莉莲 - S01E07 - Subs [1080p].ass",
     }
 
 
@@ -671,7 +687,7 @@ def test_bangumi_lookup_uses_season_aware_release_title_for_s02(tmp_path):
     )
 
     assert calls == ["[Subs] Example Show S02E03 [1080p]"]
-    assert result.actions[0].destination_path == library / "示例 第二季" / "Example Show - S02E03 - Subs [1080p].mkv"
+    assert result.actions[0].destination_path == library / "示例 第二季" / "示例 第二季 - S02E03 - Subs [1080p].mkv"
 
 
 @pytest.mark.parametrize("separator", [" / ", "/", " /", "/ "])
@@ -694,7 +710,7 @@ def test_bangumi_lookup_uses_primary_alias_for_slash_separated_release_titles(
     )
 
     assert calls == ["Tongari Boushi no Atelier"]
-    assert result.actions[0].destination_path == library / "尖帽子的魔法工房" / "Tongari Boushi no Atelier 尖帽子的魔法工房 - S01E08 - DMG&SumiSora&LoliHouse [1080p].mkv"
+    assert result.actions[0].destination_path == library / "尖帽子的魔法工房" / "尖帽子的魔法工房 - S01E08 - DMG&SumiSora&LoliHouse [1080p].mkv"
 
 
 def test_bangumi_lookup_preserves_canonical_slash_title_for_lookup(tmp_path):

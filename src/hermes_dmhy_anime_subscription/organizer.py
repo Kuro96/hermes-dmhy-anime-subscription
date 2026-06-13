@@ -173,7 +173,7 @@ def _episode_info(
         episode = stem_episode
     else:
         season, episode = title_season, title_episode
-    release_group = _metadata_text(metadata, "release_group") or _parse_release_group(text) or "Unknown"
+    release_group = _metadata_text(metadata, "release_group") or _parse_release_group(title) or _parse_release_group(path.stem) or "Unknown"
     quality = _metadata_text(metadata, "quality") or _parse_quality(text) or "Unknown"
     series_episode = title_episode if title else stem_episode
     series_title = _metadata_text(metadata, "series_title") or _series_title(
@@ -205,7 +205,7 @@ def _with_bangumi_title(info: _EpisodeInfo, bangumi_lookup: BangumiLookup | None
     library_title = _sanitize_segment(chinese_title)
     if not library_title:
         return info
-    return replace(info, library_title=library_title, flat_library=True)
+    return replace(info, title=library_title, library_title=library_title, flat_library=True)
 
 
 def _parse_episode(text: str) -> tuple[int, int | None]:
