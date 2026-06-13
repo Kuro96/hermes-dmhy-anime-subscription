@@ -8,6 +8,7 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
+import re
 import xml.etree.ElementTree as ET
 
 from .models import FeedItem
@@ -169,8 +170,26 @@ def _parse_pubdate(value: str | None) -> datetime | None:
 
 
 def _is_season_pack(category: str | None, link: str, description: str | None, title: str) -> bool:
-    haystack = " ".join(part for part in (category, link, description, title) if part).casefold()
-    return "sort_id=31" in haystack or any(clue.casefold() in haystack for clue in SEASON_PACK_CATEGORY_CLUES)
+    category_link = " ".join(part for part in (category, link) if part).casefold()
+    if "sort_id=31" in category_link or any(clue.casefold() in category_link for clue in SEASON_PACK_CATEGORY_CLUES):
+        return True
+    title_text = title.casefold()
+    if any(clue.casefold() in title_text for clue in SEASON_PACK_CATEGORY_CLUES):
+        return True
+    if description and any(clue.casefold() in description.casefold() for clue in SEASON_PACK_CATEGORY_CLUES):
+        return not _title_has_explicit_episode_marker(title)
+    return False
+
+
+def _title_has_explicit_episode_marker(title: str) -> bool:
+    return any(
+        re.search(pattern, title, flags=re.IGNORECASE)
+        for pattern in (
+            r"\bS\d{1,2}\s*E\d{1,3}\b",
+            r"第\s*\d{1,3}\s*[話话集]",
+            r"(?:^|[\[\(【★\s_.-])(?:E[Pp]?\s*)?\d{1,3}(?:v\d+)?\s*(?=$|[\]\)】\s_.-]|[（(])",
+        )
+    )
 
 
 def _selector_value(value: int | str, label: str) -> str:

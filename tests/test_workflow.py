@@ -2689,7 +2689,7 @@ def test_monitor_once_production_injects_bangumi_lookup_into_default_organizer(
         == tmp_path
         / "library"
         / "示例动画"
-        / "Example Anime - S01E01 - ExampleSub [1080p].mkv"
+        / "示例动画 - S01E01 - ExampleSub [1080p].mkv"
     )
 
 
@@ -3231,6 +3231,64 @@ def test_monitor_once_records_no_destination_unsorted_as_organizer_intervention(
     categories = [finding["category"] for finding in audit["findings"]]
     assert categories.count("organizer_intervention") == 1
     assert "organizer_pending" not in categories
+
+
+def test_monitor_once_applied_organizer_updates_content_path_and_preserves_original(tmp_path, monkeypatch):
+    config_path = _config(tmp_path, organizer_mode="move")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+    source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
+    destination = tmp_path / "library" / "Example Anime" / "Season 01" / "Example Anime - S01E01 - ExampleSub [1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-applied-content-path",
+            dedupe_key=f"infohash:{torrent_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=torrent_hash,
+            metadata={"title": "[ExampleSub] Example Anime - 01 [1080p][CHS]"},
+        )
+
+    result = monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash=torrent_hash,
+                name="[ExampleSub] Example Anime - 01 [1080p][CHS]",
+                state="uploading",
+                progress=1.0,
+                content_path=str(source),
+            ),
+        ),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            organizer_runner=lambda item, config: OrganizerResult(
+                item.job_id,
+                config.organizer.mode,
+                (
+                    OrganizerAction(
+                        Path(item.source_path),
+                        destination,
+                        "applied",
+                        "video",
+                        episode=1,
+                        season=1,
+                    ),
+                ),
+            )
+        ),
+    )
+
+    assert result.organizer_results[0].actions[0].destination_path == destination
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-applied-content-path")
+
+    assert job is not None
+    assert job["organizer_outcome"] == "applied"
+    assert job["metadata"]["content_path"] == str(destination)
+    assert job["metadata"]["original_content_path"] == str(source)
 
 
 def test_monitor_once_apply_without_organize_does_not_persist_planning_state_and_later_organizes(

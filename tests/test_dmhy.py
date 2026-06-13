@@ -54,6 +54,31 @@ def test_parse_season_pack_fixture_marks_pack_and_accepts_base32_infohash():
     assert item.is_season_pack is True
 
 
+def test_explicit_episode_title_is_not_pack_from_description_only_collection_words():
+    result = parse_rss(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>六四位元字幕組★躲在超市後門抽菸的兩人 Super no Ura de Yani Suu Futari★04(abema先行版)★1920x1080★AVC AAC MP4★繁體中文(重要公告)</title>
+      <link>https://share.dmhy.org/topics/view/200064_supermarket_yani_04.html</link>
+      <description>重要公告：BD合集資訊請見字幕組網站。</description>
+      <author>六四位元字幕組</author>
+      <category>動畫</category>
+      <guid>episode-with-description-collection-words</guid>
+      <enclosure url="magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef12345678" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="anime",
+    )
+
+    assert result.errors == ()
+    assert len(result.items) == 1
+    assert result.items[0].is_season_pack is False
+
+
 def test_parse_duplicate_fixture_preserves_duplicate_infohash_for_later_state_dedupe():
     result = parse_rss_file(FIXTURE_DIR / "rss-duplicate.xml", source_feed="duplicate")
 

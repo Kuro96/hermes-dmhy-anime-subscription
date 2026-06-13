@@ -1863,6 +1863,11 @@ def _record_organizer_actions(
                 metadata["episodes"] = sorted(episodes)
             if applied and action.season is not None:
                 metadata["season"] = action.season
+            if applied and destination_path is not None:
+                previous_content_path = _metadata_text(metadata, "content_path") or str(action.source_path)
+                metadata["content_path"] = destination_path
+                if previous_content_path != destination_path:
+                    metadata["original_content_path"] = previous_content_path
             if applied and telegram_enabled:
                 event = _telegram_event_for_organizer_action(
                     result,
