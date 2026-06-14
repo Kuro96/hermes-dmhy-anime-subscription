@@ -1484,8 +1484,15 @@ def test_run_once_base_range_suppresses_same_base_range_episode_in_feed_and_afte
         )
 
 
+@pytest.mark.parametrize(
+    "pack_title",
+    (
+        "[Subs] Example Anime 01-12合集 [1080p]",
+        "[Subs] Example Anime E01_E12合集 [1080p]",
+    ),
+)
 def test_run_once_completed_pack_with_embedded_episode_range_suppresses_later_episode(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, pack_title
 ):
     config_path = _config(tmp_path, organizer_mode="move")
     raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1495,7 +1502,6 @@ def test_run_once_completed_pack_with_embedded_episode_range_suppresses_later_ep
     monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
     monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
     fake_qbit = FakeQbittorrentClient()
-    pack_title = "[Subs] Example Anime 01-12合集 [1080p]"
 
     pack_result = run_once(
         config_path,
@@ -3282,6 +3288,28 @@ def test_monitor_once_applied_organizer_updates_content_path_and_preserves_origi
     )
 
     assert result.organizer_results[0].actions[0].destination_path == destination
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-applied-content-path")
+
+    assert job is not None
+    assert job["organizer_outcome"] == "applied"
+    assert job["metadata"]["content_path"] == str(destination)
+    assert job["metadata"]["original_content_path"] == str(source)
+
+    monitor_once(
+        config_path,
+        snapshots=(
+            TorrentSnapshot(
+                torrent_hash=torrent_hash,
+                name="[ExampleSub] Example Anime - 01 [1080p][CHS]",
+                state="uploading",
+                progress=1.0,
+                content_path=str(source),
+            ),
+        ),
+        dry_run=False,
+    )
+
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         job = state.get_job("job-applied-content-path")
 

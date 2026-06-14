@@ -104,6 +104,32 @@ def test_episode_range_title_is_pack_from_description_only_collection_words():
     assert result.items[0].is_season_pack is True
 
 
+@pytest.mark.parametrize("title", ("[Subs] Example Show 01_12 [1080p]", "[Subs] Example Show E01_E12 [1080p]"))
+def test_underscore_episode_range_title_is_pack_from_description_only_collection_words(title):
+    result = parse_rss(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>{title}</title>
+      <link>https://share.dmhy.org/topics/view/200112_example_show_01_12.html</link>
+      <description>BD合集</description>
+      <author>Subs</author>
+      <category>動畫</category>
+      <guid>season-pack-underscore-range-description-only-{title}</guid>
+      <enclosure url="magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef1234567a" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="anime",
+    )
+
+    assert result.errors == ()
+    assert len(result.items) == 1
+    assert result.items[0].is_season_pack is True
+
+
 def test_parse_duplicate_fixture_preserves_duplicate_infohash_for_later_state_dedupe():
     result = parse_rss_file(FIXTURE_DIR / "rss-duplicate.xml", source_feed="duplicate")
 

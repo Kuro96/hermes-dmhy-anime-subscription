@@ -1393,7 +1393,7 @@ def _normalize_series_key(value: str, *, strip_bare_numbers: bool = True) -> str
         )
     else:
         value = re.sub(
-            r"(?:^|[\s_\.])\d{1,3}(?:v\d+)?\s*[-–—]\s*\d{1,3}(?:v\d+)?(?=$|[\s_\.]|\s*(?:季度全集|全集|合集|season pack|batch|complete))",
+            r"(?:^|[\s_\.])(?:E[Pp]?\s*)?\d{1,3}(?:v\d+)?\s*[-–—_]\s*(?:E[Pp]?\s*)?\d{1,3}(?:v\d+)?(?=$|[\s_\.]|\s*(?:季度全集|全集|合集|season pack|batch|complete))",
             " ",
             value,
             flags=re.IGNORECASE,

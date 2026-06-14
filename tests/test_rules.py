@@ -88,6 +88,39 @@ def test_pack_mode_accepts_description_only_episode_range_pack():
     assert result.accepted is True
 
 
+def test_pack_mode_accepts_description_only_underscore_episode_range_pack():
+    item = parse_rss(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>[Subs] Example Show E01_E12 [1080p]</title>
+      <link>https://share.dmhy.org/topics/view/200112_example_show_e01_e12.html</link>
+      <description>BD合集</description>
+      <author>Subs</author>
+      <category>動畫</category>
+      <guid>season-pack-underscore-range-description-only</guid>
+      <enclosure url="magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef1234567a" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="anime",
+    ).items[0]
+
+    result = evaluate_rule(
+        item,
+        SubscriptionRule(
+            name="pack-mode",
+            include_keywords=("Example Show",),
+            episode_mode=RuleEpisodeMode.PACK,
+        ),
+    )
+
+    assert item.is_season_pack is True
+    assert result.accepted is True
+
+
 def test_dedupe_accepts_first_item_and_skips_same_infohash_or_guid():
     duplicate_items = parse_rss_file(FIXTURE_DIR / "rss-duplicate.xml", source_feed="duplicate").items
     guid_a = FeedItem(title="Guid A", link="l", guid="same-guid")

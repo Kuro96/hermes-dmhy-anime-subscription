@@ -312,6 +312,9 @@ def _record_retryable_state(
 
 def _snapshot_metadata(job: dict[str, Any], snapshot: TorrentSnapshot, observed_at: datetime, status: DownloadJobStatus) -> dict[str, Any]:
     metadata = dict(job["metadata"])
+    content_path = snapshot.content_path
+    if job["organizer_outcome"] == "applied" and metadata.get("content_path"):
+        content_path = metadata["content_path"]
     metadata.update(
         {
             "title": metadata.get("title") or snapshot.name,
@@ -320,7 +323,7 @@ def _snapshot_metadata(job: dict[str, Any], snapshot: TorrentSnapshot, observed_
             "progress": snapshot.progress,
             "last_monitored_at": observed_at.isoformat(),
             "save_path": snapshot.save_path,
-            "content_path": snapshot.content_path,
+            "content_path": content_path,
             **dict(snapshot.metadata),
         }
     )

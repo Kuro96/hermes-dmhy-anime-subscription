@@ -197,7 +197,7 @@ def _title_has_explicit_episode_marker(title: str) -> bool:
 def _title_has_episode_range_marker(title: str) -> bool:
     return (
         re.search(
-            r"(?:^|[\[\(【★\s_.-])\d{1,3}(?:v\d+)?\s*[-–—]\s*\d{1,3}(?:v\d+)?(?=$|[\]\)】\s_.-]|[（(])",
+            r"(?:^|[\[\(【★\s_.-])(?:E[Pp]?\s*)?\d{1,3}(?:v\d+)?\s*[-–—_]\s*(?:E[Pp]?\s*)?\d{1,3}(?:v\d+)?(?=$|[\]\)】\s_.-]|[（(])",
             title,
             flags=re.IGNORECASE,
         )
