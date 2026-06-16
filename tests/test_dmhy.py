@@ -79,6 +79,58 @@ def test_explicit_episode_title_is_not_pack_from_description_only_collection_wor
     assert result.items[0].is_season_pack is False
 
 
+@pytest.mark.parametrize("title", ("[Subs] Example Anime E04 [1080p]", "[Subs] Example Anime 第04話 [1080p]"))
+def test_explicit_episode_markers_are_not_pack_from_description_only_collection_words(title):
+    result = parse_rss(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>{title}</title>
+      <link>https://share.dmhy.org/topics/view/200004_example_anime_04.html</link>
+      <description>BD合集</description>
+      <author>Subs</author>
+      <category>動畫</category>
+      <guid>episode-marker-description-only-{title}</guid>
+      <enclosure url="magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef1234567b" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="anime",
+    )
+
+    assert result.errors == ()
+    assert len(result.items) == 1
+    assert result.items[0].is_season_pack is False
+
+
+@pytest.mark.parametrize("title", ("[Subs] 86 [1080p]", "[Subs] Example Anime 2 [1080p]"))
+def test_description_only_collection_words_allow_bare_numeric_series_titles(title):
+    result = parse_rss(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>{title}</title>
+      <link>https://share.dmhy.org/topics/view/200086_numeric_series_pack.html</link>
+      <description>BD合集</description>
+      <author>Subs</author>
+      <category>動畫</category>
+      <guid>numeric-series-description-only-{title}</guid>
+      <enclosure url="magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef1234567c" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="anime",
+    )
+
+    assert result.errors == ()
+    assert len(result.items) == 1
+    assert result.items[0].is_season_pack is True
+
+
 def test_episode_range_title_is_pack_from_description_only_collection_words():
     result = parse_rss(
         """<?xml version="1.0" encoding="UTF-8"?>
