@@ -32,7 +32,7 @@ from .models import (
     SubscriptionRule,
 )
 from .monitor import OrganizerInput, TorrentSnapshot, monitor_downloads
-from .organizer import OrganizerResult, organize_media
+from .organizer import EpisodeParser, OrganizerResult, organize_media
 from .qbittorrent import QbittorrentClient, QbittorrentSubmitResult, QbittorrentTorrent
 from .rules import DedupeDecision, match_rules
 from .state import SubscriptionState
@@ -64,6 +64,7 @@ class WorkflowDependencies:
     bangumi_lookup: BangumiLookup | None = None
     bangumi_subject_fetcher: BangumiSubjectFetcher | None = None
     bangumi_cover_fetcher: BangumiCoverFetcher | None = None
+    organizer_episode_parser: EpisodeParser | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,6 +477,7 @@ def monitor_once(
             organizer_input,
             loaded_config.organizer,
             bangumi_lookup=_bangumi_lookup(deps, dry_run=dry_run, metadata=organizer_input.metadata),
+            episode_parser=deps.organizer_episode_parser,
         )
     )
     with _monitor_state(config, dry_run=dry_run) as state:
@@ -689,6 +691,7 @@ def organize_once(
             item,
             loaded_config.organizer,
             bangumi_lookup=_bangumi_lookup(deps, dry_run=dry_run, metadata=item.metadata),
+            episode_parser=deps.organizer_episode_parser,
         )
     )
     effective_config = _dry_run_organizer_config(config) if dry_run else config
@@ -722,6 +725,7 @@ def plan_completed_dry_run(
             organizer_input,
             loaded_config.organizer,
             bangumi_lookup=_bangumi_lookup(deps, dry_run=True, metadata=organizer_input.metadata),
+            episode_parser=deps.organizer_episode_parser,
         )
     )
     snapshots = _completed_snapshots_from_run_result(run_result, source_path)

@@ -21,6 +21,18 @@ PATH_LIKE_FIRST_SEGMENTS = frozenset({"mnt", "home", "opt", "var", "tmp", "usr",
 
 
 @dataclass(frozen=True, slots=True)
+class EpisodeParserResult:
+    series_title: str | None = None
+    season: int | None = None
+    episode: int | None = None
+    release_group: str | None = None
+    quality: str | None = None
+
+
+EpisodeParser = Callable[[str], EpisodeParserResult | None]
+
+
+@dataclass(frozen=True, slots=True)
 class OrganizerAction:
     source_path: Path
     destination_path: Path | None
@@ -59,7 +71,13 @@ class _EpisodeInfo:
     quality: str
 
 
-def organize_media(organizer_input: OrganizerInput, config: OrganizerConfig, *, bangumi_lookup: BangumiLookup | None = None) -> OrganizerResult:
+def organize_media(
+    organizer_input: OrganizerInput,
+    config: OrganizerConfig,
+    *,
+    bangumi_lookup: BangumiLookup | None = None,
+    episode_parser: EpisodeParser | None = None,
+) -> OrganizerResult:
     """Plan or apply safe copies into a Jellyfin/Plex/Emby-compatible layout."""
 
     source_root = Path(organizer_input.source_path)
@@ -77,6 +95,7 @@ def organize_media(organizer_input: OrganizerInput, config: OrganizerConfig, *, 
             organizer_input.title,
             organizer_input.metadata,
             prefer_stem_episode=len(videos) > 1,
+            episode_parser=episode_parser,
         )
         info = _with_bangumi_title(info, bangumi_lookup, bangumi_titles)
         infos[video] = info
@@ -92,7 +111,7 @@ def organize_media(organizer_input: OrganizerInput, config: OrganizerConfig, *, 
             continue
         info = infos.get(video)
         if info is None:
-            info = _episode_info(video, organizer_input.title, organizer_input.metadata)
+            info = _episode_info(video, organizer_input.title, organizer_input.metadata, episode_parser=episode_parser)
             info = _with_bangumi_title(info, bangumi_lookup, bangumi_titles)
         destination = _subtitle_destination(library_root, info, video, subtitle)
         action = _plan_action(subtitle, destination, library_root, config.mode, "subtitle", info)
@@ -160,10 +179,22 @@ def _safe_size(path: Path) -> int:
 
 
 def _episode_info(
-    path: Path, title: str, metadata: dict[str, object], *, prefer_stem_episode: bool = False
+    path: Path,
+    title: str,
+    metadata: dict[str, object],
+    *,
+    prefer_stem_episode: bool = False,
+    episode_parser: EpisodeParser | None = None,
 ) -> _EpisodeInfo:
     title_parse = _parse_filename(title) if title else _ParsedFilename.unknown()
+    title_parse = _with_episode_parser(title, title_parse, episode_parser)
     stem_parse = _parse_filename(path.stem)
+    if prefer_stem_episode:
+        stem_episode = _single_episode_token(path.stem)
+        if stem_episode is not None:
+            stem_parse = replace(stem_parse, series_title="", lookup_title="", episode=stem_episode)
+    if not _has_title_and_episode(title_parse) or (prefer_stem_episode and stem_parse.episode is None):
+        stem_parse = _with_episode_parser(path.stem, stem_parse, episode_parser)
     if prefer_stem_episode and stem_parse.episode is not None:
         selected_episode = stem_parse.episode
         selected_season = title_parse.season if title_parse.season != DEFAULT_SEASON else stem_parse.season
@@ -225,6 +256,28 @@ def _parse_filename(text: str) -> _ParsedFilename:
             parsed_title, parsed_season, episode = parsed
             return _ParsedFilename(_clean_series_title(parsed_title), _lookup_title_from_body(parsed_title), parsed_season, episode, release_group, quality)
     return _ParsedFilename(_clean_series_title(_remove_season_markers(body)), _lookup_title_from_body(body), season, None, release_group, quality)
+
+
+def _with_episode_parser(text: str, parsed: _ParsedFilename, episode_parser: EpisodeParser | None) -> _ParsedFilename:
+    if episode_parser is None or not text.strip() or _has_title_and_episode(parsed):
+        return parsed
+    try:
+        fallback = episode_parser(text)
+    except Exception:
+        return parsed
+    if fallback is None:
+        return parsed
+    series_title = _clean_series_title(fallback.series_title) if fallback.series_title else parsed.series_title
+    lookup_title = _lookup_title_from_body(series_title) if series_title else parsed.lookup_title
+    season = fallback.season if fallback.season and fallback.season > 0 else parsed.season
+    episode = fallback.episode if fallback.episode and fallback.episode > 0 else parsed.episode
+    release_group = parsed.release_group if fallback.release_group is None else fallback.release_group.strip() or None
+    quality = parsed.quality if fallback.quality is None else fallback.quality.strip() or None
+    return _ParsedFilename(series_title, lookup_title, season, episode, release_group, quality)
+
+
+def _has_title_and_episode(parsed: _ParsedFilename) -> bool:
+    return bool(parsed.series_title and parsed.episode is not None)
 
 
 def _parse_episode(text: str) -> tuple[int, int | None]:

@@ -5,7 +5,7 @@ import pytest
 from hermes_dmhy_anime_subscription.config import OrganizerConfig
 from hermes_dmhy_anime_subscription.models import OrganizerMode
 from hermes_dmhy_anime_subscription.monitor import OrganizerInput
-from hermes_dmhy_anime_subscription.organizer import organize_media
+from hermes_dmhy_anime_subscription.organizer import EpisodeParserResult, organize_media
 
 NOW = datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc)
 
@@ -103,6 +103,72 @@ def test_no_agent_fallback_for_unparsed_episode_is_unsorted(tmp_path):
     assert result.actions[0].status == "unsorted"
     assert result.actions[0].destination_path == library / "_Unsorted" / "Example OVA" / "Example OVA.mkv"
     assert result.events[0].event_type == "organizer_unsorted"
+
+
+def test_injected_episode_parser_plans_otherwise_unsupported_title(tmp_path):
+    source = _video(tmp_path, "[Subs] Example OVA [1080p].mkv")
+    library = tmp_path / "library"
+    calls = []
+
+    def episode_parser(text):
+        calls.append(text)
+        if text == "[Subs] Example OVA [1080p]":
+            return EpisodeParserResult(series_title="Example OVA", episode=13)
+        return None
+
+    result = organize_media(
+        _organizer_input(source, title="[Subs] Example OVA [1080p]"),
+        _config(tmp_path, library),
+        episode_parser=episode_parser,
+    )
+
+    assert calls == ["[Subs] Example OVA [1080p]"]
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].destination_path == library / "Example OVA" / "Season 01" / "Example OVA - S01E13 - Subs [1080p].mkv"
+
+
+@pytest.mark.parametrize(
+    ("release_title", "expected_calls", "expected_path"),
+    [
+        (
+            "[ANi] Example Show [01][1080P]",
+            ["[ANi] Example Show [01][1080P]"],
+            "Example Show/Season 01/Example Show - S01E01 - ANi [1080P].mkv",
+        ),
+        (
+            "[ANi] Example Show - 01 [1080P][Baha][WEB-DL]",
+            ["[ANi] Example Show - 01 [1080P][Baha][WEB-DL]"],
+            "Example Show/Season 01/Example Show - S01E01 - ANi [1080P].mkv",
+        ),
+        (
+            "[Example Show][01][1080p]",
+            ["[Example Show][01][1080p]"],
+            "Example Show/Season 01/Example Show - S01E01 - Unknown [1080p].mkv",
+        ),
+    ],
+)
+def test_agent_fallback_handles_reviewed_bracket_cases_without_new_private_regex(tmp_path, release_title, expected_calls, expected_path):
+    source = _video(tmp_path, "release.mkv")
+    library = tmp_path / "library"
+    calls = []
+
+    def episode_parser(text):
+        calls.append(text)
+        if text == "[Example Show][01][1080p]":
+            return EpisodeParserResult(series_title="Example Show", episode=1, release_group="", quality="1080p")
+        if text in {"[ANi] Example Show [01][1080P]", "[ANi] Example Show - 01 [1080P][Baha][WEB-DL]"}:
+            return EpisodeParserResult(series_title="Example Show", episode=1)
+        return None
+
+    result = organize_media(
+        _organizer_input(source, title=release_title),
+        _config(tmp_path, library),
+        episode_parser=episode_parser,
+    )
+
+    assert calls == expected_calls
+    assert result.actions[0].status == "planned"
+    assert result.actions[0].destination_path == library / expected_path
 
 
 def test_multifile_torrent_ignores_extras_and_preserves_subtitles(tmp_path):
@@ -225,6 +291,24 @@ def test_multifile_torrent_uses_each_file_episode_and_release_title_season(tmp_p
     assert {action.destination_path for action in result.actions} == {
         library / "Dr STONE" / "Season 04" / "Dr STONE - S04E01 - ANi [1080P].mkv",
         library / "Dr STONE" / "Season 04" / "Dr STONE - S04E02 - ANi [1080P].mkv",
+    }
+
+
+def test_multifile_torrent_preserves_numeric_stems_with_release_title_series(tmp_path):
+    source = tmp_path / "downloads" / "torrent"
+    source.mkdir(parents=True)
+    (source / "01.mkv").write_bytes(b"first-video")
+    (source / "02.mkv").write_bytes(b"second-vide")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title="[ANi] Example Show [1080P]"),
+        _config(tmp_path, library),
+    )
+
+    assert {action.destination_path for action in result.actions} == {
+        library / "Example Show" / "Season 01" / "Example Show - S01E01 - ANi [1080P].mkv",
+        library / "Example Show" / "Season 01" / "Example Show - S01E02 - ANi [1080P].mkv",
     }
 
 

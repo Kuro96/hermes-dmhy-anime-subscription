@@ -8,13 +8,17 @@ Accepted
 
 Organizer 需要把已完成的动画下载安全地规划到媒体库目录。旧实现把大量字幕组命名、季度、分卷、合集、集数范围和标题清理规则都塞进私有解析函数，导致测试锁定 `_parse_episode` 等内部细节，也让新边界案例很容易继续堆正则。
 
-当前项目没有 LLM agent、外部 API 或人工回退执行器。解析失败时，唯一安全行为是保持现有 organizer 的 unsorted 路径和 `organizer_unsorted` 事件，让操作者之后人工处理。
+当前项目没有内建 LLM 服务、外部 API 或人工回退执行器。解析失败时，默认安全行为必须保持现有 organizer 的 unsorted 路径和 `organizer_unsorted` 事件，让操作者之后人工处理。
 
 ## 决策
 
 Organizer 文件名解析改为小型、确定性的 regex-first 解析器，只接受高置信格式：普通 `Title - 01`、`S02E03`、`S02 - 03`、`Season 2 - 03`、CJK `第2季 第03話`，以及连续方括号中的 `release group / title / episode / quality` 形态。
 
-解析器不再尝试猜测复杂或含混文件名。集数范围、disc、part、cour、volume-heavy、纯数字标题不明确等情况标记为需要回退，当前行为就是 `episode=None`，由 organizer 规划到 `_Unsorted` 并发出 warning event。
+解析器不再尝试猜测复杂或含混文件名。集数范围、disc、part、cour、volume-heavy、纯数字标题不明确等情况标记为需要回退；没有注入 agent/parser 时，当前行为就是 `episode=None`，由 organizer 规划到 `_Unsorted` 并发出 warning event。
+
+当调用方确实有更高层的 agent 或人工审核结果时，可以在 `organize_media` 入口注入 `episode_parser` callable。Organizer 仍然先运行确定性 regex 解析；只有简单解析拿不到标题或集数时才调用该回退。回退只返回结构化的标题、季、集、字幕组和画质字段，不引入项目内 LLM 服务、凭据或配置面。回退抛错、返回空值或未注入时都保持默认 unsorted 安全行为。
+
+多文件 torrent 中的 `01.mkv`、`02.mkv` 这类纯数字 stem 只在 `prefer_stem_episode` 场景下作为高置信集数 token 使用，系列标题和季信息仍来自 torrent title 或注入回退，避免把单文件纯数字标题误判为剧名/集数。
 
 测试改为从 `organize_media` 入口验证行为：目标路径、unsorted、字幕保留、extras/sample 过滤、路径净化、冲突、不覆盖、apply copy、Bangumi 标题注入。私有解析函数不再作为测试契约。
 
@@ -28,7 +32,7 @@ DMHY RSS 的 pack 判断仍属于 `dmhy.py` / rules / workflow 层，organizer �
 
 ## 非目标
 
-不新增 LLM、agent、API、凭据或配置回退面。
+不新增内建 LLM、API、凭据或配置回退面；agent 能力只通过调用方显式注入的 Python callable 表达。
 
 不实现复杂合集拆分、季度包自动展开、disc/volume/part/cour 的智能语义识别。
 

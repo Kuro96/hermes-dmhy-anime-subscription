@@ -10,7 +10,7 @@ from hermes_dmhy_anime_subscription import workflow
 from hermes_dmhy_anime_subscription.config import ConfigError, load_config
 from hermes_dmhy_anime_subscription.models import DownloadJobStatus, FailureRecord
 from hermes_dmhy_anime_subscription.monitor import OrganizerInput, TorrentSnapshot
-from hermes_dmhy_anime_subscription.organizer import OrganizerAction, OrganizerResult
+from hermes_dmhy_anime_subscription.organizer import EpisodeParserResult, OrganizerAction, OrganizerResult
 from hermes_dmhy_anime_subscription.qbittorrent import (
     QbittorrentSubmitResult,
     QbittorrentTorrent,
@@ -2850,6 +2850,42 @@ def test_organize_once_dry_run_forces_planning_even_when_config_mode_moves(tmp_p
 
     assert result.result.actions[0].status == "planned"
     assert source.exists()
+
+
+def test_organize_once_passes_dependency_episode_parser_to_default_organizer(tmp_path):
+    config_path = _config(tmp_path)
+    source = tmp_path / "downloads" / "[ExampleSub] Example OVA [1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    calls = []
+
+    def episode_parser(text):
+        calls.append(text)
+        if text == "[ExampleSub] Example OVA [1080p]":
+            return EpisodeParserResult(series_title="Example OVA", episode=13)
+        return None
+
+    result = organize_once(
+        config_path,
+        OrganizerInput(
+            "job-organize-fallback",
+            "HASH",
+            "[ExampleSub] Example OVA [1080p]",
+            str(source),
+            datetime.now(timezone.utc),
+        ),
+        dependencies=WorkflowDependencies(organizer_episode_parser=episode_parser),
+    )
+
+    assert calls == ["[ExampleSub] Example OVA [1080p]"]
+    assert result.result.actions[0].status == "planned"
+    assert result.result.actions[0].destination_path == (
+        tmp_path
+        / "library"
+        / "Example OVA"
+        / "Season 01"
+        / "Example OVA - S01E13 - ExampleSub [1080p].mkv"
+    )
 
 
 def test_apply_mode_refuses_unsafe_config_until_credentials_and_move_are_explicit(
