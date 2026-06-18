@@ -315,6 +315,38 @@ def test_multifile_torrent_preserves_numeric_stems_with_release_title_series(tmp
     }
 
 
+def test_multifile_numeric_stems_strip_fallback_range_from_release_title(tmp_path):
+    source = tmp_path / "downloads" / "torrent"
+    source.mkdir(parents=True)
+    (source / "01.mkv").write_bytes(b"first-video")
+    (source / "02.mkv").write_bytes(b"second-video")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title="[Subs] Example Show 01-12 [1080p]"),
+        _config(tmp_path, library),
+    )
+
+    assert {action.destination_path for action in result.actions} == {
+        library / "Example Show" / "Season 01" / "Example Show - S01E01 - Subs [1080p].mkv",
+        library / "Example Show" / "Season 01" / "Example Show - S01E02 - Subs [1080p].mkv",
+    }
+
+
+def test_single_file_range_release_title_without_parser_stays_unsorted(tmp_path):
+    source = _video(tmp_path, "release.mkv")
+    library = tmp_path / "library"
+
+    result = organize_media(
+        _organizer_input(source, title="[Subs] Example Show 01-12 [1080p]"),
+        _config(tmp_path, library),
+    )
+
+    assert result.actions[0].status == "unsorted"
+    assert result.actions[0].episode is None
+    assert result.actions[0].destination_path == library / "_Unsorted" / "Example Show" / "Example Show.mkv"
+
+
 def _video(tmp_path, name, content=b"video"):
     source = tmp_path / "downloads" / name
     source.parent.mkdir(parents=True, exist_ok=True)

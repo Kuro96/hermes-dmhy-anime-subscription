@@ -249,7 +249,8 @@ def _parse_filename(text: str) -> _ParsedFilename:
         return bracket_parse
     season = _parse_season_only(body) or DEFAULT_SEASON
     if _needs_fallback(body):
-        return _ParsedFilename(_clean_series_title(_remove_season_markers(body)), _lookup_title_from_body(body), season, None, release_group, quality)
+        fallback_title = _remove_fallback_episode_ranges(_remove_season_markers(body))
+        return _ParsedFilename(_clean_series_title(fallback_title), _lookup_title_from_body(fallback_title), season, None, release_group, quality)
     for parser in (_parse_sxxexx, _parse_season_episode, _parse_cjk_season_episode, _parse_delimited_episode):
         parsed = parser(body, season)
         if parsed is not None:
@@ -423,6 +424,15 @@ def _remove_season_markers(value: str) -> str:
     value = re.sub(r"\bSeason\s*\d{1,2}\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"第\s*\d{1,2}\s*[季期]", " ", value)
     return value
+
+
+def _remove_fallback_episode_ranges(value: str) -> str:
+    return re.sub(
+        r"(?:^|(?<=[\s\[\(-]))(?:E?\d{1,3})\s*[-_]\s*(?:E?\d{1,3})(?=$|[\s\]\)-])",
+        " ",
+        value,
+        flags=re.IGNORECASE,
+    )
 
 
 def _clean_series_title(value: str) -> str:
