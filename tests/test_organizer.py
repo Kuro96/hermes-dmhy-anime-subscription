@@ -28,6 +28,8 @@ def test_simple_release_title_plans_media_server_destination(tmp_path):
     ("release_title", "expected_path"),
     [
         ("Example Show S02E03", "Example Show/Season 02/Example Show - S02E03 - Unknown [Unknown].mkv"),
+        ("[Subs] Example Show [S02E03][1080p]", "Example Show/Season 02/Example Show - S02E03 - Subs [1080p].mkv"),
+        ("Example Show (S02E03) [1080p]", "Example Show/Season 02/Example Show - S02E03 - Unknown [1080p].mkv"),
         ("Example Show S02 - 03", "Example Show/Season 02/Example Show - S02E03 - Unknown [Unknown].mkv"),
         ("Example Show Season 2 - 03", "Example Show/Season 02/Example Show - S02E03 - Unknown [Unknown].mkv"),
         ("Example Show 第2季 第03話", "Example Show/Season 02/Example Show - S02E03 - Unknown [Unknown].mkv"),
@@ -315,7 +317,7 @@ def test_multifile_torrent_preserves_numeric_stems_with_release_title_series(tmp
     }
 
 
-def test_multifile_numeric_stems_strip_fallback_range_from_release_title(tmp_path):
+def test_multifile_numeric_stems_with_range_release_title_without_parser_are_unsorted(tmp_path):
     source = tmp_path / "downloads" / "torrent"
     source.mkdir(parents=True)
     (source / "01.mkv").write_bytes(b"first-video")
@@ -327,7 +329,43 @@ def test_multifile_numeric_stems_strip_fallback_range_from_release_title(tmp_pat
         _config(tmp_path, library),
     )
 
-    assert {action.destination_path for action in result.actions} == {
+    video_actions = [action for action in result.actions if action.media_type == "video"]
+    assert video_actions
+    assert all(action.status == "unsorted" for action in video_actions)
+    assert all(action.episode is None for action in video_actions)
+    assert {action.destination_path for action in video_actions} == {
+        library / "_Unsorted" / "Example Show 01 12" / "Example Show 01 12.mkv"
+    }
+    assert {event.event_type for event in result.events} == {"organizer_unsorted"}
+    assert not any(
+        action.destination_path and library / "Example Show" / "Season 01" in action.destination_path.parents
+        for action in video_actions
+    )
+
+
+def test_multifile_numeric_stems_with_injected_parser_plan_under_parser_series(tmp_path):
+    source = tmp_path / "downloads" / "torrent"
+    source.mkdir(parents=True)
+    (source / "01.mkv").write_bytes(b"first-video")
+    (source / "02.mkv").write_bytes(b"second-video")
+    library = tmp_path / "library"
+    calls = []
+
+    def episode_parser(text):
+        calls.append(text)
+        if text == "[Subs] Example Show 01-12 [1080p]":
+            return EpisodeParserResult(series_title="Example Show")
+        return None
+
+    result = organize_media(
+        _organizer_input(source, title="[Subs] Example Show 01-12 [1080p]"),
+        _config(tmp_path, library),
+        episode_parser=episode_parser,
+    )
+
+    assert "[Subs] Example Show 01-12 [1080p]" in calls
+    assert all(action.status == "planned" for action in result.actions if action.media_type == "video")
+    assert {action.destination_path for action in result.actions if action.media_type == "video"} == {
         library / "Example Show" / "Season 01" / "Example Show - S01E01 - Subs [1080p].mkv",
         library / "Example Show" / "Season 01" / "Example Show - S01E02 - Subs [1080p].mkv",
     }
@@ -344,7 +382,11 @@ def test_single_file_range_release_title_without_parser_stays_unsorted(tmp_path)
 
     assert result.actions[0].status == "unsorted"
     assert result.actions[0].episode is None
-    assert result.actions[0].destination_path == library / "_Unsorted" / "Example Show" / "Example Show.mkv"
+    assert result.events[0].event_type == "organizer_unsorted"
+    assert not (
+        result.actions[0].destination_path
+        and library / "Example Show" / "Season 01" in result.actions[0].destination_path.parents
+    )
 
 
 def _video(tmp_path, name, content=b"video"):

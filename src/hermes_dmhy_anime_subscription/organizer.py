@@ -192,16 +192,18 @@ def _episode_info(
     if prefer_stem_episode:
         stem_episode = _single_episode_token(path.stem)
         if stem_episode is not None:
-            stem_parse = replace(stem_parse, series_title="", lookup_title="", episode=stem_episode)
+            stem_parse = replace(stem_parse, series_title="", lookup_title="", episode=stem_episode, structured_title=False)
     if not _has_title_and_episode(title_parse) or (prefer_stem_episode and stem_parse.episode is None):
         stem_parse = _with_episode_parser(path.stem, stem_parse, episode_parser)
-    if prefer_stem_episode and stem_parse.episode is not None:
+    title_has_structured_title = bool(title_parse.series_title and title_parse.structured_title)
+    stem_has_structured_title = bool(stem_parse.series_title and stem_parse.structured_title)
+    if prefer_stem_episode and stem_parse.episode is not None and title_has_structured_title:
         selected_episode = stem_parse.episode
         selected_season = title_parse.season if title_parse.season != DEFAULT_SEASON else stem_parse.season
-    elif title_parse.episode is not None:
+    elif title_parse.episode is not None and title_has_structured_title:
         selected_episode = title_parse.episode
         selected_season = title_parse.season
-    elif stem_parse.episode is not None and title_parse.episode is None:
+    elif stem_parse.episode is not None and (title_has_structured_title or stem_has_structured_title):
         selected_episode = stem_parse.episode
         selected_season = title_parse.season if title_parse.season != DEFAULT_SEASON else stem_parse.season
     else:
@@ -210,8 +212,19 @@ def _episode_info(
 
     release_group = _metadata_text(metadata, "release_group") or title_parse.release_group or stem_parse.release_group or "Unknown"
     quality = _metadata_text(metadata, "quality") or title_parse.quality or stem_parse.quality or "Unknown"
-    series_title = _metadata_text(metadata, "series_title") or title_parse.series_title or stem_parse.series_title or "Unknown Series"
-    lookup_title = title_parse.lookup_title or stem_parse.lookup_title or series_title
+    series_title = (
+        _metadata_text(metadata, "series_title")
+        or (title_parse.series_title if title_has_structured_title or selected_episode is None else "")
+        or (stem_parse.series_title if stem_has_structured_title else "")
+        or title_parse.series_title
+        or "Unknown Series"
+    )
+    lookup_title = (
+        (title_parse.lookup_title if title_has_structured_title or selected_episode is None else "")
+        or (stem_parse.lookup_title if stem_has_structured_title else "")
+        or title_parse.lookup_title
+        or series_title
+    )
     return _EpisodeInfo(
         title=_sanitize_segment(series_title) or "Unknown Series",
         lookup_title=lookup_title,
@@ -232,10 +245,11 @@ class _ParsedFilename:
     episode: int | None
     release_group: str | None
     quality: str | None
+    structured_title: bool
 
     @classmethod
     def unknown(cls) -> "_ParsedFilename":
-        return cls("", "", DEFAULT_SEASON, None, None, None)
+        return cls("", "", DEFAULT_SEASON, None, None, None, False)
 
 
 def _parse_filename(text: str) -> _ParsedFilename:
@@ -249,14 +263,15 @@ def _parse_filename(text: str) -> _ParsedFilename:
         return bracket_parse
     season = _parse_season_only(body) or DEFAULT_SEASON
     if _needs_fallback(body):
-        fallback_title = _remove_fallback_episode_ranges(_remove_season_markers(body))
-        return _ParsedFilename(_clean_series_title(fallback_title), _lookup_title_from_body(fallback_title), season, None, release_group, quality)
+        fallback_title = _remove_season_markers(body)
+        return _ParsedFilename(_clean_series_title(fallback_title), _lookup_title_from_body(fallback_title), season, None, release_group, quality, False)
     for parser in (_parse_sxxexx, _parse_season_episode, _parse_cjk_season_episode, _parse_delimited_episode):
         parsed = parser(body, season)
         if parsed is not None:
             parsed_title, parsed_season, episode = parsed
-            return _ParsedFilename(_clean_series_title(parsed_title), _lookup_title_from_body(parsed_title), parsed_season, episode, release_group, quality)
-    return _ParsedFilename(_clean_series_title(_remove_season_markers(body)), _lookup_title_from_body(body), season, None, release_group, quality)
+            return _ParsedFilename(_clean_series_title(parsed_title), _lookup_title_from_body(parsed_title), parsed_season, episode, release_group, quality, True)
+    title = _remove_season_markers(body)
+    return _ParsedFilename(_clean_series_title(title), _lookup_title_from_body(title), season, None, release_group, quality, True)
 
 
 def _with_episode_parser(text: str, parsed: _ParsedFilename, episode_parser: EpisodeParser | None) -> _ParsedFilename:
@@ -268,17 +283,18 @@ def _with_episode_parser(text: str, parsed: _ParsedFilename, episode_parser: Epi
         return parsed
     if fallback is None:
         return parsed
-    series_title = _clean_series_title(fallback.series_title) if fallback.series_title else parsed.series_title
-    lookup_title = _lookup_title_from_body(series_title) if series_title else parsed.lookup_title
+    has_parser_title = bool(fallback.series_title and fallback.series_title.strip())
+    series_title = _clean_series_title(fallback.series_title) if has_parser_title else parsed.series_title
+    lookup_title = _lookup_title_from_body(series_title) if has_parser_title and series_title else parsed.lookup_title
     season = fallback.season if fallback.season and fallback.season > 0 else parsed.season
-    episode = fallback.episode if fallback.episode and fallback.episode > 0 else parsed.episode
+    episode = fallback.episode if fallback.episode and fallback.episode > 0 and (has_parser_title or parsed.structured_title) else parsed.episode
     release_group = parsed.release_group if fallback.release_group is None else fallback.release_group.strip() or None
     quality = parsed.quality if fallback.quality is None else fallback.quality.strip() or None
-    return _ParsedFilename(series_title, lookup_title, season, episode, release_group, quality)
+    return _ParsedFilename(series_title, lookup_title, season, episode, release_group, quality, parsed.structured_title or has_parser_title)
 
 
 def _has_title_and_episode(parsed: _ParsedFilename) -> bool:
-    return bool(parsed.series_title and parsed.episode is not None)
+    return bool(parsed.series_title and parsed.episode is not None and parsed.structured_title)
 
 
 def _parse_episode(text: str) -> tuple[int, int | None]:
@@ -336,14 +352,15 @@ def _parse_consecutive_brackets(body: str, release_group: str | None, quality: s
         return _ParsedFilename.unknown()
     season = _parse_season_only(title) or DEFAULT_SEASON
     title_without_season = _remove_season_markers(title)
-    return _ParsedFilename(_clean_series_title(title_without_season), _lookup_title_from_body(title_without_season), season, episode, release_group, quality)
+    return _ParsedFilename(_clean_series_title(title_without_season), _lookup_title_from_body(title_without_season), season, episode, release_group, quality, True)
 
 
 def _parse_sxxexx(body: str, default_season: int) -> tuple[str, int, int] | None:
     match = re.search(r"(?P<title>.*?)\bS(?P<season>\d{1,2})\s*E(?P<episode>\d{1,3})\b", body, flags=re.IGNORECASE)
     if not match:
         return None
-    return match.group("title"), int(match.group("season")), int(match.group("episode"))
+    title = re.sub(r"[\s\[(]+$", " ", match.group("title"))
+    return title, int(match.group("season")), int(match.group("episode"))
 
 
 def _parse_season_episode(body: str, default_season: int) -> tuple[str, int, int] | None:
@@ -424,15 +441,6 @@ def _remove_season_markers(value: str) -> str:
     value = re.sub(r"\bSeason\s*\d{1,2}\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"第\s*\d{1,2}\s*[季期]", " ", value)
     return value
-
-
-def _remove_fallback_episode_ranges(value: str) -> str:
-    return re.sub(
-        r"(?:^|(?<=[\s\[\(-]))(?:E?\d{1,3})\s*[-_]\s*(?:E?\d{1,3})(?=$|[\s\]\)-])",
-        " ",
-        value,
-        flags=re.IGNORECASE,
-    )
 
 
 def _clean_series_title(value: str) -> str:
