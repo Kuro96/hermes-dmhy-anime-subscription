@@ -312,19 +312,30 @@ def _parse_consecutive_brackets(body: str, release_group: str | None, quality: s
         return None
     title = ""
     episode: int | None = None
+    episode_token_count = 0
     for match in matches:
         content = match.group(1).strip()
+        possible_episode = _single_episode_token(content)
         if not content or _is_spec_bracket(content, None):
-            possible_episode = _single_episode_token(content)
-            if possible_episode is not None:
+            if title and possible_episode is not None:
+                episode_token_count += 1
+                if episode_token_count > 1:
+                    return _ParsedFilename.unknown()
                 episode = possible_episode
             continue
         if title:
+            if possible_episode is not None:
+                episode_token_count += 1
+                if episode_token_count > 1:
+                    return _ParsedFilename.unknown()
+                episode = possible_episode
             continue
         title = content
     if not title:
         return _ParsedFilename.unknown()
-    return _ParsedFilename(_clean_series_title(title), _lookup_title_from_body(title), DEFAULT_SEASON, episode, release_group, quality)
+    season = _parse_season_only(title) or DEFAULT_SEASON
+    title_without_season = _remove_season_markers(title)
+    return _ParsedFilename(_clean_series_title(title_without_season), _lookup_title_from_body(title_without_season), season, episode, release_group, quality)
 
 
 def _parse_sxxexx(body: str, default_season: int) -> tuple[str, int, int] | None:
