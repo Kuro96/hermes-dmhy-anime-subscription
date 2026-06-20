@@ -182,6 +182,8 @@ def _is_season_pack(category: str | None, link: str, description: str | None, ti
 
 
 def _title_has_explicit_episode_marker(title: str) -> bool:
+    if _title_has_season_episode_marker(title):
+        return True
     if _title_has_episode_range_marker(title):
         return False
     return any(
@@ -193,6 +195,17 @@ def _title_has_explicit_episode_marker(title: str) -> bool:
             r"(?:^|\s)0\d{1,2}(?:v\d+)?\s*(?=$|[\]\)】\s_.-]|[（(])",
             r"(?:^|[\[\(【★_.-]\s*)\d{1,3}(?:v\d+)?\s*(?=$|[\]\)】\s_.-]|[（(])",
         )
+    )
+
+
+def _title_has_season_episode_marker(title: str) -> bool:
+    return (
+        re.search(
+            r"\bSeason\s+\d{1,2}\s*[-–—]\s*(?:E[Pp]?\s*)?\d{1,3}(?:v\d+)?(?!\s*[-–—_]\s*(?:E[Pp]?\s*)?\d)\s*(?=$|[\]\)】\s_.-]|[（(])",
+            title,
+            flags=re.IGNORECASE,
+        )
+        is not None
     )
 
 

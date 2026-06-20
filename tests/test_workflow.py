@@ -3442,6 +3442,104 @@ def test_monitor_once_applied_sidecar_action_preserves_primary_content_path(
     assert job["metadata"]["original_content_path"] == str(source)
 
 
+def test_monitor_once_mixed_sidecar_conflict_preserves_applied_video_content_path_after_next_tick(
+    tmp_path, monkeypatch
+):
+    config_path = _config(tmp_path, organizer_mode="move")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    torrent_hash = "abcdef1234567890abcdef1234567890abcdef12"
+    source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS]"
+    video_source = source / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
+    subtitle_source = source / "[ExampleSub] Example Anime - 01 [1080p][CHS].ass"
+    video_destination = (
+        tmp_path
+        / "library"
+        / "Example Anime"
+        / "Season 01"
+        / "Example Anime - S01E01 - ExampleSub [1080p].mkv"
+    )
+    subtitle_destination = (
+        tmp_path
+        / "library"
+        / "Example Anime"
+        / "Season 01"
+        / "Example Anime - S01E01 - ExampleSub [1080p].ass"
+    )
+    source.mkdir(parents=True)
+    video_source.write_bytes(b"video")
+    subtitle_source.write_text("subtitle", encoding="utf-8")
+    subtitle_destination.parent.mkdir(parents=True)
+    subtitle_destination.write_text("existing subtitle", encoding="utf-8")
+    snapshot = TorrentSnapshot(
+        torrent_hash=torrent_hash,
+        name="[ExampleSub] Example Anime - 01 [1080p][CHS]",
+        state="uploading",
+        progress=1.0,
+        content_path=str(source),
+    )
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        state.upsert_job(
+            "job-mixed-sidecar-conflict-content-path",
+            dedupe_key=f"infohash:{torrent_hash}",
+            status=DownloadJobStatus.SUBMITTED,
+            torrent_hash=torrent_hash,
+            metadata={"title": "[ExampleSub] Example Anime - 01 [1080p][CHS]"},
+        )
+
+    monitor_once(
+        config_path,
+        snapshots=(snapshot,),
+        dry_run=False,
+        dependencies=WorkflowDependencies(
+            organizer_runner=lambda item, config: OrganizerResult(
+                item.job_id,
+                config.organizer.mode,
+                (
+                    OrganizerAction(
+                        video_source,
+                        video_destination,
+                        "applied",
+                        "video",
+                        episode=1,
+                        season=1,
+                    ),
+                    OrganizerAction(
+                        subtitle_source,
+                        subtitle_destination,
+                        "conflict",
+                        "subtitle",
+                        episode=1,
+                        season=1,
+                    ),
+                ),
+            )
+        ),
+    )
+
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-mixed-sidecar-conflict-content-path")
+
+    assert job is not None
+    assert job["organizer_outcome"] == "conflict"
+    assert job["metadata"]["content_path"] == str(video_destination)
+    assert job["metadata"]["original_content_path"] == str(source)
+
+    monitor_once(
+        config_path,
+        snapshots=(snapshot,),
+        dry_run=False,
+    )
+
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        job = state.get_job("job-mixed-sidecar-conflict-content-path")
+
+    assert job is not None
+    assert job["organizer_outcome"] == "conflict"
+    assert job["metadata"]["content_path"] == str(video_destination)
+    assert job["metadata"]["original_content_path"] == str(source)
+
+
 def test_monitor_once_apply_without_organize_does_not_persist_planning_state_and_later_organizes(
     tmp_path, monkeypatch
 ):

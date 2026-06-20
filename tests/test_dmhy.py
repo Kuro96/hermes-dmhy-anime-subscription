@@ -85,6 +85,7 @@ def test_explicit_episode_title_is_not_pack_from_description_only_collection_wor
         "[Subs] Example Anime 04 [1080p]",
         "[Subs] Example Anime 004 [1080p]",
         "[Subs] Example Anime E04 [1080p]",
+        "[Subs] Example Show Season 2 - 03 [1080p]",
         "[Subs] Example Anime 第04話 [1080p]",
     ),
 )
