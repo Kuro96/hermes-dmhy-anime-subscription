@@ -212,7 +212,14 @@ def _title_has_season_episode_marker(title: str) -> bool:
 def _title_has_episode_range_marker(title: str) -> bool:
     return (
         re.search(
-            r"(?:^|[\[\(【★\s_.-])(?:E[Pp]?\s*)?\d{1,3}(?:v\d+)?\s*[-–—_]\s*(?:E[Pp]?\s*)?\d{1,3}(?:v\d+)?(?=$|[\]\)】\s_.-]|[（(])",
+            r"\bS\d{1,2}\s*E\d{1,3}(?:v\d+)?\s*[-–—_]\s*(?:S\d{1,2}\s*)?E\d{1,3}(?:v\d+)?(?=$|[\]\)】\s_.-]|[（(])",
+            title,
+            flags=re.IGNORECASE,
+        )
+        is not None
+        or
+        re.search(
+            r"(?:^|[\[\(【★\s_.-])(?:E[Pp]?\s*)?0\d{1,2}(?:v\d+)?\s*[-–—_]\s*(?:E[Pp]?\s*)?\d{1,3}(?:v\d+)?(?=$|[\]\)】\s_.-]|[（(])",
             title,
             flags=re.IGNORECASE,
         )

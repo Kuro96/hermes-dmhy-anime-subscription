@@ -140,6 +140,31 @@ def test_description_only_collection_words_allow_bare_numeric_series_titles(titl
     assert result.items[0].is_season_pack is True
 
 
+def test_numeric_series_title_episode_is_not_pack_from_description_only_collection_words():
+    result = parse_rss(
+        """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>[Subs] 86 - 01 [1080p]</title>
+      <link>https://share.dmhy.org/topics/view/200086_numeric_series_episode_01.html</link>
+      <description>BD合集</description>
+      <author>Subs</author>
+      <category>動畫</category>
+      <guid>numeric-series-episode-description-only</guid>
+      <enclosure url="magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef1234567d" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="anime",
+    )
+
+    assert result.errors == ()
+    assert len(result.items) == 1
+    assert result.items[0].is_season_pack is False
+
+
 def test_episode_range_title_is_pack_from_description_only_collection_words():
     result = parse_rss(
         """<?xml version="1.0" encoding="UTF-8"?>
@@ -179,6 +204,35 @@ def test_underscore_episode_range_title_is_pack_from_description_only_collection
       <category>動畫</category>
       <guid>season-pack-underscore-range-description-only-{title}</guid>
       <enclosure url="magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef1234567a" type="application/x-bittorrent" />
+    </item>
+  </channel>
+</rss>
+""",
+        source_feed="anime",
+    )
+
+    assert result.errors == ()
+    assert len(result.items) == 1
+    assert result.items[0].is_season_pack is True
+
+
+@pytest.mark.parametrize(
+    "title",
+    ("[Subs] Example Show S01E01-S01E12 [1080p]", "[Subs] Example Show S01E01-E12 [1080p]"),
+)
+def test_season_episode_range_title_is_pack_from_description_only_collection_words(title):
+    result = parse_rss(
+        f"""<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <item>
+      <title>{title}</title>
+      <link>https://share.dmhy.org/topics/view/200112_example_show_s01e01_s01e12.html</link>
+      <description>BD合集</description>
+      <author>Subs</author>
+      <category>動畫</category>
+      <guid>season-pack-season-episode-range-description-only-{title}</guid>
+      <enclosure url="magnet:?xt=urn:btih:1234567890abcdef1234567890abcdef1234567e" type="application/x-bittorrent" />
     </item>
   </channel>
 </rss>
