@@ -328,6 +328,7 @@ def _parse_consecutive_brackets(body: str, release_group: str | None, quality: s
     if any(stripped[matches[index].end() : matches[index + 1].start()].strip() for index in range(len(matches) - 1)):
         return None
     title = ""
+    bracket_season: int | None = None
     episode: int | None = None
     episode_token_count = 0
     for match in matches:
@@ -346,6 +347,13 @@ def _parse_consecutive_brackets(body: str, release_group: str | None, quality: s
                 if episode_token_count > 1:
                     return _ParsedFilename.unknown()
                 episode = possible_episode
+            else:
+                parsed = _parse_bracketed_season_episode(content)
+                if parsed is not None:
+                    episode_token_count += 1
+                    if episode_token_count > 1:
+                        return _ParsedFilename.unknown()
+                    bracket_season, episode = parsed
             continue
         title = content
     if not title:
@@ -360,9 +368,23 @@ def _parse_consecutive_brackets(body: str, release_group: str | None, quality: s
             quality,
             False,
         )
-    season = _parse_season_only(title) or DEFAULT_SEASON
+    season = bracket_season or _parse_season_only(title) or DEFAULT_SEASON
     title_without_season = _remove_season_markers(title)
     return _ParsedFilename(_clean_series_title(title_without_season), _lookup_title_from_body(title_without_season), season, episode, release_group, quality, True)
+
+
+def _parse_bracketed_season_episode(content: str) -> tuple[int, int] | None:
+    sxxexx = re.fullmatch(r"S(?P<season>\d{1,2})\s*E(?P<episode>\d{1,3})", content, flags=re.IGNORECASE)
+    if sxxexx:
+        return int(sxxexx.group("season")), int(sxxexx.group("episode"))
+    season_episode = re.fullmatch(
+        r"Season\s*(?P<season>\d{1,2})\s*[-_. ]+\s*(?P<episode>\d{1,3})",
+        content,
+        flags=re.IGNORECASE,
+    )
+    if season_episode:
+        return int(season_episode.group("season")), int(season_episode.group("episode"))
+    return None
 
 
 def _parse_sxxexx(body: str, default_season: int) -> tuple[str, int, int] | None:
