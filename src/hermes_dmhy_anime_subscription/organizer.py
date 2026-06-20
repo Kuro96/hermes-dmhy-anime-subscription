@@ -350,6 +350,16 @@ def _parse_consecutive_brackets(body: str, release_group: str | None, quality: s
         title = content
     if not title:
         return _ParsedFilename.unknown()
+    if _has_unsupported_season_label(title):
+        return _ParsedFilename(
+            _clean_series_title(title),
+            _lookup_title_from_body(title),
+            DEFAULT_SEASON,
+            None,
+            release_group,
+            quality,
+            False,
+        )
     season = _parse_season_only(title) or DEFAULT_SEASON
     title_without_season = _remove_season_markers(title)
     return _ParsedFilename(_clean_series_title(title_without_season), _lookup_title_from_body(title_without_season), season, episode, release_group, quality, True)
@@ -402,6 +412,7 @@ def _parse_season_only(body: str) -> int | None:
     for pattern in (
         r"\bS(?P<season>\d{1,2})\b",
         r"\bSeason\s*(?P<season>\d{1,2})\b",
+        r"\b(?P<season>\d{1,2})(?:st|nd|rd|th)\s+Season\b",
         r"第\s*(?P<season>\d{1,2})\s*[季期]",
     ):
         match = re.search(pattern, body, flags=re.IGNORECASE)
@@ -410,8 +421,18 @@ def _parse_season_only(body: str) -> int | None:
     return None
 
 
+def _has_unsupported_season_label(value: str) -> bool:
+    word_ordinal = r"(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|final|last)"
+    return bool(
+        re.search(rf"\b{word_ordinal}\s+season\b", value, flags=re.IGNORECASE)
+        or re.search(rf"\bseason\s+{word_ordinal}\b", value, flags=re.IGNORECASE)
+    )
+
+
 def _needs_fallback(body: str) -> bool:
     stripped = _strip_spec_brackets(body)
+    if _has_unsupported_season_label(stripped):
+        return True
     range_text = _remove_season_markers(stripped)
     if re.search(r"(?:^|[\s\[\(-])(?:E?\d{1,3})\s*[-_]\s*(?:E?\d{1,3})(?=$|[\s\]\)-])", range_text, flags=re.IGNORECASE):
         return True
@@ -439,6 +460,7 @@ def _strip_brackets(value: str) -> str:
 def _remove_season_markers(value: str) -> str:
     value = re.sub(r"\bS\d{1,2}\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"\bSeason\s*\d{1,2}\b", " ", value, flags=re.IGNORECASE)
+    value = re.sub(r"\b\d{1,2}(?:st|nd|rd|th)\s+Season\b", " ", value, flags=re.IGNORECASE)
     value = re.sub(r"第\s*\d{1,2}\s*[季期]", " ", value)
     return value
 

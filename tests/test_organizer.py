@@ -32,10 +32,12 @@ def test_simple_release_title_plans_media_server_destination(tmp_path):
         ("Example Show (S02E03) [1080p]", "Example Show/Season 02/Example Show - S02E03 - Unknown [1080p].mkv"),
         ("Example Show S02 - 03", "Example Show/Season 02/Example Show - S02E03 - Unknown [Unknown].mkv"),
         ("Example Show Season 2 - 03", "Example Show/Season 02/Example Show - S02E03 - Unknown [Unknown].mkv"),
+        ("Example Show 2nd Season - 03", "Example Show/Season 02/Example Show - S02E03 - Unknown [Unknown].mkv"),
         ("Example Show 第2季 第03話", "Example Show/Season 02/Example Show - S02E03 - Unknown [Unknown].mkv"),
         ("[Subs][Example Show][01][1080p]", "Example Show/Season 01/Example Show - S01E01 - Subs [1080p].mkv"),
         ("[Subs][Example Show][10][1080p]", "Example Show/Season 01/Example Show - S01E10 - Subs [1080p].mkv"),
         ("[Subs][Example Show S02][03][1080p]", "Example Show/Season 02/Example Show - S02E03 - Subs [1080p].mkv"),
+        ("[Subs][Example Show 2nd Season][03][1080p]", "Example Show/Season 02/Example Show - S02E03 - Subs [1080p].mkv"),
     ],
 )
 def test_high_confidence_supported_filename_shapes_plan_destination(tmp_path, release_title, expected_path):
@@ -78,6 +80,10 @@ def test_numeric_title_is_preserved_as_series_title(tmp_path):
         "[Subs] Example Show - 01-12 [1080p]",
         "[Subs] Example Show S02 E01-E12 [1080p]",
         "[Subs] Example Show Season 2 Part 2 - 03 [1080p]",
+        "[Subs] Example Show 2nd Season Part 2 - 03 [1080p]",
+        "Example Show Final Season - 03",
+        "Example Show Second Season - 03",
+        "[Subs][Example Show Final Season][03][1080p]",
         "[Subs] Example Show Season 2 Cour 2 [1080p]",
         "[Subs] Example Show Season 2 Vol. 3 [1080p]",
         "[Subs] Example Show BD 2 Discs - 01 [1080p]",
