@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 import json
 
-from hermes_dmhy_anime_subscription.config import ConfigError, load_config
+from hermes_dmhy_anime_subscription.config import ConfigError, OrganizerConfig, load_config
 from hermes_dmhy_anime_subscription.models import OrganizerMode, RuleEpisodeMode
 
 
@@ -28,6 +28,10 @@ def test_valid_example_config_loads_with_safe_defaults():
     assert config.qbittorrent.save_path == "var/qbittorrent-downloads"
     assert config.polling.interval_minutes == 15
     assert config.organizer.mode is OrganizerMode.DRY_RUN
+    assert config.organizer.episode_parser.mode == "none"
+    assert config.organizer.episode_parser.callback_url_env is None
+    assert config.organizer.episode_parser.timeout_seconds == 20
+    assert config.organizer.episode_parser.min_confidence == 0.8
     assert config.webhook.enabled is False
     assert config.webhook.url_env == "DMHY_WEBHOOK_URL"
     assert config.telegram.enabled is False
@@ -60,6 +64,53 @@ def test_telegram_enabled_settings_parse(tmp_path):
     assert config.telegram.message_thread_id == 42
     assert config.telegram.parse_mode == "HTML"
     assert config.telegram.timeout == 12.5
+
+
+def test_organizer_episode_parser_callback_settings_parse(tmp_path):
+    raw = json.loads((FIXTURE_DIR / "valid.example.json").read_text(encoding="utf-8"))
+    raw["organizer"]["episode_parser"] = {
+        "mode": "callback",
+        "callback_url_env": "HERMES_EPISODE_PARSER_URL",
+        "timeout_seconds": 2.5,
+        "min_confidence": 0.7,
+    }
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    config = load_config(path)
+
+    assert config.organizer.episode_parser.mode == "callback"
+    assert config.organizer.episode_parser.callback_url_env == "HERMES_EPISODE_PARSER_URL"
+    assert config.organizer.episode_parser.timeout_seconds == 2.5
+    assert config.organizer.episode_parser.min_confidence == 0.7
+
+
+@pytest.mark.parametrize(
+    ("episode_parser", "message"),
+    [
+        ({"mode": "agent"}, "organizer.episode_parser.mode"),
+        ({"mode": "callback"}, "callback_url_env"),
+        ({"mode": "callback", "callback_url_env": "https://example.invalid/hook"}, "environment variable name"),
+        ({"mode": "callback", "callback_url_env": "HERMES_EPISODE_PARSER_URL", "timeout_seconds": 0}, "timeout_seconds"),
+        ({"mode": "callback", "callback_url_env": "HERMES_EPISODE_PARSER_URL", "min_confidence": 1.5}, "min_confidence"),
+        ({"mode": "callback", "callback_url_env": "HERMES_EPISODE_PARSER_URL", "min_confidence": -0.1}, "min_confidence"),
+    ],
+)
+def test_organizer_episode_parser_rejects_invalid_settings(tmp_path, episode_parser, message):
+    raw = json.loads((FIXTURE_DIR / "valid.example.json").read_text(encoding="utf-8"))
+    raw["organizer"]["episode_parser"] = episode_parser
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(path)
+
+
+def test_old_positional_organizer_config_uses_default_episode_parser(tmp_path):
+    config = OrganizerConfig(OrganizerMode.DRY_RUN, tmp_path / "library", tmp_path / "staging")
+
+    assert config.episode_parser.mode == "none"
+    assert config.episode_parser.timeout_seconds == 20
 
 
 @pytest.mark.parametrize("parse_mode", ["Markdown", "MarkdownV2", "HTML"])

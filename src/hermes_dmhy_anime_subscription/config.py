@@ -57,10 +57,19 @@ class StateConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class OrganizerEpisodeParserConfig:
+    mode: str = "none"
+    callback_url_env: str | None = None
+    timeout_seconds: float = 20
+    min_confidence: float = 0.8
+
+
+@dataclass(frozen=True, slots=True)
 class OrganizerConfig:
     mode: OrganizerMode
     library_root: Path
     staging_root: Path
+    episode_parser: OrganizerEpisodeParserConfig = OrganizerEpisodeParserConfig()
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,6 +228,35 @@ def _parse_organizer(raw: dict[str, Any], base: Path) -> OrganizerConfig:
         mode=mode,
         library_root=library_root,
         staging_root=_path_value(raw, "staging_root", base),
+        episode_parser=_parse_organizer_episode_parser(raw.get("episode_parser", {})),
+    )
+
+
+def _parse_organizer_episode_parser(value: Any) -> OrganizerEpisodeParserConfig:
+    if not isinstance(value, dict):
+        raise ConfigError("organizer.episode_parser must be an object")
+    raw = value
+    mode = _optional_string(raw.get("mode"), "organizer.episode_parser.mode") or "none"
+    if mode not in {"none", "callback"}:
+        raise ConfigError("organizer.episode_parser.mode must be none or callback")
+    callback_url_env = _optional_env_name(raw.get("callback_url_env"), "organizer.episode_parser.callback_url_env")
+    timeout = _optional_number_value(raw.get("timeout_seconds"), "organizer.episode_parser.timeout_seconds")
+    min_confidence = _optional_number_value(raw.get("min_confidence"), "organizer.episode_parser.min_confidence")
+    if timeout is None:
+        timeout = 20
+    if min_confidence is None:
+        min_confidence = 0.8
+    if mode == "callback" and not callback_url_env:
+        raise ConfigError("organizer.episode_parser.callback_url_env is required when mode is callback")
+    if timeout <= 0:
+        raise ConfigError("organizer.episode_parser.timeout_seconds must be greater than zero")
+    if min_confidence < 0 or min_confidence > 1:
+        raise ConfigError("organizer.episode_parser.min_confidence must be between 0 and 1")
+    return OrganizerEpisodeParserConfig(
+        mode=mode,
+        callback_url_env=callback_url_env,
+        timeout_seconds=timeout,
+        min_confidence=min_confidence,
     )
 
 

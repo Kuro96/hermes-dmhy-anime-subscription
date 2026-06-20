@@ -1,6 +1,8 @@
 import json
 import sqlite3
+import threading
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -2888,6 +2890,175 @@ def test_organize_once_passes_dependency_episode_parser_to_default_organizer(tmp
     )
 
 
+def test_organize_once_uses_configured_callback_episode_parser(tmp_path, monkeypatch):
+    config_path = _config(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["organizer"]["episode_parser"] = {
+        "mode": "callback",
+        "callback_url_env": "HERMES_EPISODE_PARSER_URL",
+        "timeout_seconds": 2,
+        "min_confidence": 0.8,
+    }
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    server, bodies = _episode_parser_server(
+        {
+            "series_title": "Example OVA",
+            "season": 1,
+            "episode": 13,
+            "release_group": "ExampleSub",
+            "quality": "1080p",
+            "confidence": 0.95,
+        }
+    )
+    thread = _serve_episode_parser(server)
+    monkeypatch.setenv("HERMES_EPISODE_PARSER_URL", f"http://127.0.0.1:{server.server_port}/parse")
+    source = tmp_path / "downloads" / "[ExampleSub] Example OVA Final Part [1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    try:
+        result = organize_once(
+            config_path,
+            OrganizerInput(
+                "job-organize-callback",
+                "HASH-SHOULD-NOT-POST",
+                "[ExampleSub] Example OVA Final Part [1080p]",
+                str(source),
+                datetime.now(timezone.utc),
+                {
+                    "rule_name": "example-rule",
+                    "bangumi_subject_id": 12345,
+                    "release_group": "ExampleSub",
+                    "quality": "1080p",
+                    "category": "動畫",
+                    "source_path": "/secret/source.mkv",
+                    "content_path": "/secret/content.mkv",
+                    "original_content_path": "/secret/original.mkv",
+                    "save_path": "/secret/save",
+                    "job_id": "secret-job",
+                    "torrent_hash": "HASH-SHOULD-NOT-POST",
+                    "chat_id": "secret-chat",
+                    "bot_token": "secret-token",
+                    "raw_metadata": {"private": "value"},
+                },
+            ),
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+    assert result.result.actions[0].status == "planned"
+    assert result.result.actions[0].destination_path == (
+        tmp_path
+        / "library"
+        / "Example OVA"
+        / "Season 01"
+        / "Example OVA - S01E13 - ExampleSub [1080p].mkv"
+    )
+    assert set(bodies[0]) == {"task", "text", "title", "source_name", "safe_context"}
+    assert bodies[0]["task"] == "organizer_episode_parse"
+    assert bodies[0]["title"] == "[ExampleSub] Example OVA Final Part [1080p]"
+    assert bodies[0]["text"] == "[ExampleSub] Example OVA Final Part [1080p]"
+    assert bodies[0]["source_name"] == source.name
+    assert bodies[0]["safe_context"] == {
+        "rule_name": "example-rule",
+        "bangumi_subject_id": 12345,
+        "release_group": "ExampleSub",
+        "quality": "1080p",
+        "category": "動畫",
+    }
+    serialized_payload = json.dumps(bodies[0], ensure_ascii=False, sort_keys=True)
+    assert str(tmp_path) not in serialized_payload
+    for forbidden in (
+        "source_path",
+        "content_path",
+        "original_content_path",
+        "save_path",
+        "job_id",
+        "torrent_hash",
+        "chat_id",
+        "bot_token",
+        "raw_metadata",
+        "HASH-SHOULD-NOT-POST",
+        "secret-token",
+    ):
+        assert forbidden not in serialized_payload
+
+
+def test_organize_once_low_confidence_callback_result_keeps_unsorted(tmp_path, monkeypatch):
+    config_path = _config(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["organizer"]["episode_parser"] = {
+        "mode": "callback",
+        "callback_url_env": "HERMES_EPISODE_PARSER_URL",
+        "timeout_seconds": 2,
+        "min_confidence": 0.8,
+    }
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    server, bodies = _episode_parser_server({"series_title": "Example OVA", "episode": 13, "confidence": 0.2})
+    thread = _serve_episode_parser(server)
+    monkeypatch.setenv("HERMES_EPISODE_PARSER_URL", f"http://127.0.0.1:{server.server_port}/parse")
+    source = tmp_path / "downloads" / "[ExampleSub] Example OVA Final Part [1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+    try:
+        result = organize_once(
+            config_path,
+            OrganizerInput(
+                "job-organize-low-confidence",
+                "HASH",
+                "[ExampleSub] Example OVA Final Part [1080p]",
+                str(source),
+                datetime.now(timezone.utc),
+            ),
+        )
+    finally:
+        server.shutdown()
+        thread.join(timeout=2)
+        server.server_close()
+
+    assert len(bodies) == 1
+    assert result.result.actions[0].status == "unsorted"
+    assert result.result.actions[0].episode is None
+
+
+def test_dependency_episode_parser_overrides_configured_callback_parser(tmp_path):
+    config_path = _config(tmp_path)
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    raw["organizer"]["episode_parser"] = {
+        "mode": "callback",
+        "callback_url_env": "HERMES_EPISODE_PARSER_URL",
+    }
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    source = tmp_path / "downloads" / "[ExampleSub] Example OVA [1080p].mkv"
+    source.parent.mkdir()
+    source.write_bytes(b"video")
+
+    result = organize_once(
+        config_path,
+        OrganizerInput(
+            "job-organize-override",
+            "HASH",
+            "[ExampleSub] Example OVA [1080p]",
+            str(source),
+            datetime.now(timezone.utc),
+        ),
+        dependencies=WorkflowDependencies(
+            organizer_episode_parser=lambda text: EpisodeParserResult(series_title="Injected OVA", episode=7)
+            if text == "[ExampleSub] Example OVA [1080p]"
+            else None
+        ),
+    )
+
+    assert result.result.actions[0].destination_path == (
+        tmp_path
+        / "library"
+        / "Injected OVA"
+        / "Season 01"
+        / "Injected OVA - S01E07 - ExampleSub [1080p].mkv"
+    )
+
+
 def test_apply_mode_refuses_unsafe_config_until_credentials_and_move_are_explicit(
     tmp_path, monkeypatch
 ):
@@ -5156,6 +5327,30 @@ def _config(tmp_path, organizer_mode="dry-run"):
     path = tmp_path / f"config-{organizer_mode}.json"
     path.write_text(json.dumps(raw), encoding="utf-8")
     return path
+
+
+def _episode_parser_server(response):
+    bodies = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            bodies.append(json.loads(self.rfile.read(length).decode("utf-8")))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode("utf-8"))
+
+        def log_message(self, format, *args):
+            return None
+
+    return HTTPServer(("127.0.0.1", 0), Handler), bodies
+
+
+def _serve_episode_parser(server):
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return thread
 
 
 def _telegram_config(tmp_path):

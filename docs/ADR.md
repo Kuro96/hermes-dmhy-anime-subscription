@@ -18,7 +18,9 @@ Organizer 文件名解析改为小型、确定性的 regex-first 解析器，只
 
 订阅规则和 Bangumi subject 上下文（例如 `bangumi_subject_id`）才是工作流里的季度身份来源。Organizer 标题解析器只是高置信辅助：当调用方已经以 rule/subject 表达了季的身份时，不能再从任意发布标题营销文案里推断或覆盖该身份；标题中的复杂 season label 解析不了时必须进入回退/unsorted 边界。
 
-当调用方确实有更高层的 agent 或人工审核结果时，可以在 `organize_media` 入口注入 `episode_parser` callable。Organizer 仍然先运行确定性 regex 解析；只有简单解析拿不到标题或集数时才调用该回退。回退只返回结构化的标题、季、集、字幕组和画质字段，不引入项目内 LLM 服务、凭据或配置面。回退抛错、返回空值或未注入时都保持默认 unsorted 安全行为。
+当调用方确实有更高层的 agent 或人工审核结果时，可以在 `organize_media` 入口注入 `episode_parser` callable。Organizer 仍然先运行确定性 regex 解析；只有简单解析拿不到标题或集数时才调用该回退。回退只返回结构化的标题、季、集、字幕组和画质字段。回退抛错、返回空值或未注入时都保持默认 unsorted 安全行为。
+
+工作流还支持可选的 `organizer.episode_parser.mode=callback`，用于把默认 organizer 路径桥接到受信任的 Hermes callback bridge。该配置只保存 URL 环境变量名，运行时用 stdlib HTTP POST 调用；依赖注入的 `episode_parser` 仍优先于配置回调。回调请求采用隐私最小化 payload：只发送 task、待解析 title/text、源文件 basename (`source_name`)，以及 `safe_context` 中的 `rule_name`、`bangumi_subject_id`、`release_group`、`quality`、`category` allowlist。不得发送绝对路径、content/save path、torrent hash、job id、webhook URL、token、用户名、chat id、凭据、环境变量值或 raw metadata。缺少环境变量、URL 非法、超时、HTTP 错误、非 JSON、低置信度或字段非法时都返回空结果，让 organizer 继续进入 `_Unsorted`。
 
 多文件 torrent 中的 `01.mkv`、`02.mkv` 这类纯数字 stem 只在 `prefer_stem_episode` 场景下作为高置信集数 token 使用，系列标题和季信息仍来自 torrent title 或注入回退，避免把单文件纯数字标题误判为剧名/集数。
 
@@ -34,7 +36,7 @@ DMHY RSS 的 pack 判断仍属于 `dmhy.py` / rules / workflow 层，organizer �
 
 ## 非目标
 
-不新增内建 LLM、API、凭据或配置回退面；agent 能力只通过调用方显式注入的 Python callable 表达。
+不新增内建 LLM、凭据或自动猜测逻辑；agent 能力只通过调用方显式注入的 Python callable，或显式启用且隐私最小化的 HTTP callback 桥接表达。
 
 不实现复杂合集拆分、季度包自动展开、disc/volume/part/cour 的智能语义识别。
 

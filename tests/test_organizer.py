@@ -395,6 +395,12 @@ def test_single_file_range_release_title_without_parser_stays_unsorted(tmp_path)
     )
 
 
+def test_organizer_config_positional_construction_keeps_default_episode_parser(tmp_path):
+    config = OrganizerConfig(OrganizerMode.DRY_RUN, tmp_path / "library", tmp_path / "staging")
+
+    assert config.episode_parser.mode == "none"
+
+
 def _video(tmp_path, name, content=b"video"):
     source = tmp_path / "downloads" / name
     source.parent.mkdir(parents=True, exist_ok=True)

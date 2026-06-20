@@ -169,6 +169,23 @@ Archived rules are created only by apply-mode monitoring after a rule with `bang
 
 `staging_root` is reserved for staging workflows and must be a valid path.
 
+`episode_parser` is optional and defaults to `{"mode": "none"}`. Set `mode` to `callback` only when you run a trusted Hermes callback bridge that can turn difficult release titles into structured episode data. The callback URL is read from the environment variable named by `callback_url_env`; put only the env var name in config, never the literal URL.
+
+Example:
+
+```json
+{
+  "episode_parser": {
+    "mode": "callback",
+    "callback_url_env": "HERMES_EPISODE_CALLBACK_URL",
+    "timeout_seconds": 20,
+    "min_confidence": 0.8
+  }
+}
+```
+
+The callback receives a privacy-minimized JSON payload with the task, title/text being parsed, source basename as `source_name`, and a `safe_context` allowlist of `rule_name`, `bangumi_subject_id`, `release_group`, `quality`, and `category`. It does not send absolute source paths, content/save paths, torrent hashes, job IDs, webhook URLs, tokens, user names, chat IDs, credentials, environment values, or raw metadata. Missing env vars, invalid URLs, timeouts, non-2xx responses, invalid JSON, low confidence, or invalid parse fields all fail closed by returning no parse result, so the organizer keeps the item under `_Unsorted` for manual handling.
+
 ### `webhook`
 
 `enabled` turns webhook delivery on or off.

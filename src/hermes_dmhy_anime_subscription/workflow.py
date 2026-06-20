@@ -20,6 +20,7 @@ from .bangumi import (
     fetch_subject_title,
     lookup_chinese_title,
 )
+from .callback_parser import CallbackEpisodeParser
 from .config import ConfigError, OrganizerConfig, PluginConfig, load_config
 from .dmhy import parse_rss
 from .models import (
@@ -477,7 +478,7 @@ def monitor_once(
             organizer_input,
             loaded_config.organizer,
             bangumi_lookup=_bangumi_lookup(deps, dry_run=dry_run, metadata=organizer_input.metadata),
-            episode_parser=deps.organizer_episode_parser,
+            episode_parser=_organizer_episode_parser(deps, loaded_config.organizer, organizer_input),
         )
     )
     with _monitor_state(config, dry_run=dry_run) as state:
@@ -691,7 +692,7 @@ def organize_once(
             item,
             loaded_config.organizer,
             bangumi_lookup=_bangumi_lookup(deps, dry_run=dry_run, metadata=item.metadata),
-            episode_parser=deps.organizer_episode_parser,
+            episode_parser=_organizer_episode_parser(deps, loaded_config.organizer, item),
         )
     )
     effective_config = _dry_run_organizer_config(config) if dry_run else config
@@ -725,7 +726,7 @@ def plan_completed_dry_run(
             organizer_input,
             loaded_config.organizer,
             bangumi_lookup=_bangumi_lookup(deps, dry_run=True, metadata=organizer_input.metadata),
-            episode_parser=deps.organizer_episode_parser,
+            episode_parser=_organizer_episode_parser(deps, loaded_config.organizer, organizer_input),
         )
     )
     snapshots = _completed_snapshots_from_run_result(run_result, source_path)
@@ -1442,8 +1443,26 @@ def _dry_run_organizer_config(config: PluginConfig) -> PluginConfig:
         mode=OrganizerMode.DRY_RUN,
         library_root=config.organizer.library_root,
         staging_root=config.organizer.staging_root,
+        episode_parser=config.organizer.episode_parser,
     )
     return replace(config, organizer=organizer)
+
+
+def _organizer_episode_parser(
+    deps: WorkflowDependencies,
+    config: OrganizerConfig,
+    organizer_input: OrganizerInput,
+) -> EpisodeParser | None:
+    if deps.organizer_episode_parser is not None:
+        return deps.organizer_episode_parser
+    if config.episode_parser.mode != "callback":
+        return None
+    return CallbackEpisodeParser(
+        config.episode_parser,
+        title=organizer_input.title,
+        source_path=organizer_input.source_path,
+        metadata=organizer_input.metadata,
+    )
 
 
 def _bangumi_lookup(
