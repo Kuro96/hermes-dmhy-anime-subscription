@@ -44,7 +44,6 @@ class WebhookDeliveryPlan:
     url: str
     redacted_url: str
     payload: dict[str, Any]
-    dry_run: bool = False
 
     def body(self) -> bytes:
         return json.dumps(self.payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -119,10 +118,9 @@ class WebhookNotifier:
         qbittorrent_hash: str | None = None,
         status: str | None = None,
         failure_reason: str | None = None,
-        dry_run: bool = False,
     ) -> WebhookDispatchResult:
         if not self.config.enabled:
-            plan = WebhookDeliveryPlan(url="", redacted_url="<disabled>", payload=build_webhook_payload(event, dry_run=dry_run), dry_run=dry_run)
+            plan = WebhookDeliveryPlan(url="", redacted_url="<disabled>", payload=build_webhook_payload(event))
             return WebhookDispatchResult(
                 success=True,
                 status="disabled",
@@ -132,7 +130,7 @@ class WebhookNotifier:
             )
 
         if not self.webhook_url:
-            plan = WebhookDeliveryPlan(url="", redacted_url="<redacted>", payload=build_webhook_payload(event, dry_run=dry_run), dry_run=dry_run)
+            plan = WebhookDeliveryPlan(url="", redacted_url="<redacted>", payload=build_webhook_payload(event))
             message = f"Webhook URL environment variable {self.config.url_env} is not set"
             error = WebhookError(kind="configuration", message=message, retryable=False)
             failure = _failure_record(event, message, recoverable=False)
@@ -156,9 +154,8 @@ class WebhookNotifier:
             qbittorrent_hash=qbittorrent_hash,
             status=status,
             failure_reason=failure_reason,
-            dry_run=dry_run,
         )
-        plan = WebhookDeliveryPlan(url=self.webhook_url, redacted_url=_redact_url(self.webhook_url), payload=payload, dry_run=dry_run)
+        plan = WebhookDeliveryPlan(url=self.webhook_url, redacted_url=_redact_url(self.webhook_url), payload=payload)
         try:
             response = self._post_json(plan)
         except _RetryableTransportError as exc:
@@ -205,7 +202,6 @@ def build_webhook_payload(
     qbittorrent_hash: str | None = None,
     status: str | None = None,
     failure_reason: str | None = None,
-    dry_run: bool = False,
 ) -> dict[str, Any]:
     metadata = dict(event.metadata)
     resolved_rule_id = rule_id or _text(metadata.get("rule_id"))
@@ -237,7 +233,6 @@ def build_webhook_payload(
         "status": resolved_status,
         "failure_reason": resolved_failure_reason,
         "timestamp": event.created_at.isoformat(),
-        "dry_run": dry_run,
         "severity": event.severity,
         "title": event.title,
         "message": event.message,

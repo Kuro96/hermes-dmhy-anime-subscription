@@ -25,9 +25,8 @@ def test_release_readiness_script_runs_offline_checks_without_pytest_recursion()
 
     assert result.returncode == 0, result.stdout
     assert "release readiness: static AST check passed" in result.stdout
-    assert "planned qBittorrent submit:" in result.stdout
-    assert "planned organizer:" in result.stdout
-    assert "invalid config rejected as expected" in result.stdout
+    assert "release readiness: invalid config rejected as expected" in result.stdout
+    assert "release readiness: passed" in result.stdout
 
 
 def test_release_readiness_script_fails_explicitly_for_invalid_config():

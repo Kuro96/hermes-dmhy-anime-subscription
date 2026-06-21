@@ -80,20 +80,20 @@ def test_timeout_is_retryable_failure_not_processed_success():
     assert result.error.kind == "transport"
 
 
-def test_dry_run_plans_submission_without_http_calls():
+def test_submit_posts_to_qbittorrent():
     transport = MockTransport([QbittorrentHttpResponse(status=200, body="Ok.")])
 
-    result = QbittorrentClient(_config(), transport=transport).submit(_candidate(), dry_run=True)
+    result = QbittorrentClient(_config(), transport=transport).submit(_candidate())
 
     assert result.success is True
-    assert result.dry_run is True
+    assert result.status == "submitted"
     assert result.plan.payload() == {
         "urls": "magnet:?xt=urn:btih:ABC123",
         "category": "anime",
         "tags": "dmhy,subscription",
         "savepath": "/downloads/anime",
     }
-    assert transport.requests == []
+    assert len(transport.requests) == 1
 
 
 def test_planner_uses_torrent_url_when_magnet_is_absent():

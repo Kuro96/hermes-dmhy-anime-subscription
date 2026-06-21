@@ -27,7 +27,7 @@ def test_valid_example_config_loads_with_safe_defaults():
     assert config.qbittorrent.tags == ("dmhy", "subscription")
     assert config.qbittorrent.save_path == "var/qbittorrent-downloads"
     assert config.polling.interval_minutes == 15
-    assert config.organizer.mode is OrganizerMode.DRY_RUN
+    assert config.organizer.mode is OrganizerMode.APPLY
     assert config.organizer.episode_parser.mode == "none"
     assert config.organizer.episode_parser.callback_url_env is None
     assert config.organizer.episode_parser.timeout_seconds == 20
@@ -107,7 +107,7 @@ def test_organizer_episode_parser_rejects_invalid_settings(tmp_path, episode_par
 
 
 def test_old_positional_organizer_config_uses_default_episode_parser(tmp_path):
-    config = OrganizerConfig(OrganizerMode.DRY_RUN, tmp_path / "library", tmp_path / "staging")
+    config = OrganizerConfig(OrganizerMode.APPLY, tmp_path / "library", tmp_path / "staging")
 
     assert config.episode_parser.mode == "none"
     assert config.episode_parser.timeout_seconds == 20

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -216,17 +215,17 @@ def _parse_polling(raw: dict[str, Any]) -> PollingConfig:
 
 
 def _parse_organizer(raw: dict[str, Any], base: Path) -> OrganizerConfig:
-    mode = OrganizerMode(_string_value(raw, "mode", "organizer.mode"))
+    raw_mode = _string_value(raw, "mode", "organizer.mode")
+    try:
+        mode = OrganizerMode(raw_mode)
+    except ValueError as exc:
+        raise ConfigError("organizer.mode must be apply or move") from exc
     library_value = raw.get("library_root")
-    if mode in {OrganizerMode.APPLY, OrganizerMode.MOVE} and not _has_text(library_value):
-        raise ConfigError("organizer.library_root is required when organizer.mode is apply or move")
     if not _has_text(library_value):
-        library_root = Path(tempfile.gettempdir()) / "hermes-dmhy-library-dry-run"
-    else:
-        library_root = _resolve_path(str(library_value), base)
+        raise ConfigError("organizer.library_root is required when organizer.mode is apply or move")
     return OrganizerConfig(
         mode=mode,
-        library_root=library_root,
+        library_root=_resolve_path(str(library_value), base),
         staging_root=_path_value(raw, "staging_root", base),
         episode_parser=_parse_organizer_episode_parser(raw.get("episode_parser", {})),
     )

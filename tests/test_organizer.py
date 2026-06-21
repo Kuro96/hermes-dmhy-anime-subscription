@@ -19,8 +19,10 @@ def test_simple_release_title_plans_media_server_destination(tmp_path):
         _config(tmp_path, library),
     )
 
-    assert result.actions[0].status == "planned"
-    assert result.actions[0].destination_path == library / "Example Show" / "Season 01" / "Example Show - S01E01 - Subs [1080p].mkv"
+    destination = library / "Example Show" / "Season 01" / "Example Show - S01E01 - Subs [1080p].mkv"
+    assert result.actions[0].status == "applied"
+    assert result.actions[0].destination_path == destination
+    assert destination.read_bytes() == b"video"
     assert source.exists()
 
 
@@ -48,8 +50,9 @@ def test_high_confidence_supported_filename_shapes_plan_destination(tmp_path, re
 
     result = organize_media(_organizer_input(source, title=release_title), _config(tmp_path, library))
 
-    assert result.actions[0].status == "planned"
+    assert result.actions[0].status == "applied"
     assert result.actions[0].destination_path == library / expected_path
+    assert (library / expected_path).read_bytes() == b"video"
 
 
 def test_cjk_season_destination_is_preserved(tmp_path):
@@ -141,9 +144,11 @@ def test_injected_episode_parser_plans_otherwise_unsupported_title(tmp_path):
         episode_parser=episode_parser,
     )
 
+    destination = library / "Example OVA" / "Season 01" / "Example OVA - S01E13 - Subs [1080p].mkv"
     assert calls == ["[Subs] Example OVA [1080p]"]
-    assert result.actions[0].status == "planned"
-    assert result.actions[0].destination_path == library / "Example OVA" / "Season 01" / "Example OVA - S01E13 - Subs [1080p].mkv"
+    assert result.actions[0].status == "applied"
+    assert result.actions[0].destination_path == destination
+    assert destination.read_bytes() == b"video"
 
 
 @pytest.mark.parametrize(
@@ -186,8 +191,9 @@ def test_agent_fallback_handles_reviewed_bracket_cases_without_new_private_regex
     )
 
     assert calls == expected_calls
-    assert result.actions[0].status == "planned"
+    assert result.actions[0].status == "applied"
     assert result.actions[0].destination_path == library / expected_path
+    assert (library / expected_path).read_bytes() == b"video"
 
 
 def test_multifile_torrent_ignores_extras_and_preserves_subtitles(tmp_path):
@@ -377,12 +383,16 @@ def test_multifile_numeric_stems_with_injected_parser_plan_under_parser_series(t
         episode_parser=episode_parser,
     )
 
+    first_destination = library / "Example Show" / "Season 01" / "Example Show - S01E01 - Subs [1080p].mkv"
+    second_destination = library / "Example Show" / "Season 01" / "Example Show - S01E02 - Subs [1080p].mkv"
     assert "[Subs] Example Show 01-12 [1080p]" in calls
-    assert all(action.status == "planned" for action in result.actions if action.media_type == "video")
+    assert all(action.status == "applied" for action in result.actions if action.media_type == "video")
     assert {action.destination_path for action in result.actions if action.media_type == "video"} == {
-        library / "Example Show" / "Season 01" / "Example Show - S01E01 - Subs [1080p].mkv",
-        library / "Example Show" / "Season 01" / "Example Show - S01E02 - Subs [1080p].mkv",
+        first_destination,
+        second_destination,
     }
+    assert first_destination.read_bytes() == b"first-video"
+    assert second_destination.read_bytes() == b"second-video"
 
 
 def test_single_file_range_release_title_without_parser_stays_unsorted(tmp_path):
@@ -404,7 +414,7 @@ def test_single_file_range_release_title_without_parser_stays_unsorted(tmp_path)
 
 
 def test_organizer_config_positional_construction_keeps_default_episode_parser(tmp_path):
-    config = OrganizerConfig(OrganizerMode.DRY_RUN, tmp_path / "library", tmp_path / "staging")
+    config = OrganizerConfig(OrganizerMode.APPLY, tmp_path / "library", tmp_path / "staging")
 
     assert config.episode_parser.mode == "none"
 
@@ -416,7 +426,7 @@ def _video(tmp_path, name, content=b"video"):
     return source
 
 
-def _config(tmp_path, library, mode=OrganizerMode.DRY_RUN):
+def _config(tmp_path, library, mode=OrganizerMode.APPLY):
     return OrganizerConfig(mode=mode, library_root=library, staging_root=tmp_path / "staging")
 
 

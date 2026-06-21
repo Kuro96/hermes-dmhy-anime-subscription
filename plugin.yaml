@@ -3,7 +3,6 @@ version: "0.1.0"
 description: Hermes plugin for safe DMHY anime subscription workflow orchestration.
 provides_tools:
   - dmhy.validate_config
-  - dmhy.run_once_dry_run
   - dmhy.run_once_apply
   - dmhy.monitor_once
   - dmhy.organize_once

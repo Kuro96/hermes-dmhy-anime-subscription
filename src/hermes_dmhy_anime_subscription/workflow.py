@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 import base64
 from datetime import datetime, timezone
 import json
@@ -21,7 +21,7 @@ from .bangumi import (
     lookup_chinese_title,
 )
 from .callback_parser import CallbackEpisodeParser
-from .config import ConfigError, OrganizerConfig, PluginConfig, load_config
+from .config import ConfigError, PluginConfig, load_config
 from .dmhy import parse_rss
 from .models import (
     DownloadJobStatus,
@@ -39,10 +39,8 @@ from .rules import DedupeDecision, match_rules
 from .state import SubscriptionState
 from .telegram import TelegramDispatchResult, TelegramNotifier, _valid_bot_token
 from .webhook import (
-    WebhookDeliveryPlan,
     WebhookDispatchResult,
     WebhookNotifier,
-    build_webhook_payload,
 )
 
 FeedFetcher = Callable[[str], str]
@@ -80,18 +78,17 @@ class CandidateOutcome:
 
 @dataclass(frozen=True, slots=True)
 class RunOnceResult:
-    dry_run: bool
     parsed_items: int
     parse_errors: int
     candidates: tuple[CandidateOutcome, ...]
     events: tuple[NotificationEvent, ...]
 
     @property
-    def planned_submissions(self) -> int:
+    def submitted_submissions(self) -> int:
         return sum(
             1
             for outcome in self.candidates
-            if outcome.submit_result is not None and outcome.submit_result.dry_run
+            if outcome.submit_result is not None and outcome.submit_result.success
         )
 
 
@@ -107,7 +104,6 @@ class MonitorOnceResult:
 
 @dataclass(frozen=True, slots=True)
 class ProductionTickResult:
-    dry_run: bool
     run_result: RunOnceResult
     torrent_count: int = 0
     snapshots: tuple[TorrentSnapshot, ...] = ()
@@ -145,7 +141,6 @@ class ProductionTickResult:
     def summary(self) -> dict[str, object]:
         return {
             "ok": self.ok,
-            "dry_run": self.dry_run,
             "run_once": {
                 "parsed_items": self.run_result.parsed_items,
                 "parse_errors": self.run_result.parse_errors,
@@ -244,11 +239,10 @@ def validate_config(config_path: str | os.PathLike[str]) -> PluginConfig:
 def run_once(
     config_path: str | os.PathLike[str],
     *,
-    dry_run: bool = True,
     dependencies: WorkflowDependencies | None = None,
 ) -> RunOnceResult:
     config = load_config(config_path)
-    ensure_apply_safe(config, dry_run=dry_run)
+    ensure_apply_safe(config)
     deps = dependencies or WorkflowDependencies()
     fetcher = deps.feed_fetcher or fetch_url_text
     qbittorrent = (
@@ -272,7 +266,7 @@ def run_once(
         parse_errors += len(parsed.errors)
 
     archived_rule_names = _archived_rule_names(config)
-    with _run_once_state(config, dry_run=dry_run) as state:
+    with SubscriptionState(config.state.path) as state:
         satisfied_seasons = set(
             state.list_satisfied_season_packs()
         ) | _active_satisfied_season_packs(
@@ -315,45 +309,43 @@ def run_once(
             rule: SubscriptionRule,
         ) -> QbittorrentSubmitResult:
             job_id = job_id_for_candidate(candidate)
-            submit_result = qbittorrent.submit(candidate, rule=rule, dry_run=dry_run)
-            status = _job_status(submit_result, dry_run=dry_run)
-            if not dry_run:
-                metadata = {
-                    "title": candidate.title,
-                    "rule_name": candidate.rule_name,
-                    "bangumi_subject_id": rule.bangumi_subject_id,
-                    "episode": _candidate_episode(candidate),
-                    "dry_run": dry_run,
-                    "submit_status": submit_result.status,
-                    "qbittorrent_category": submit_result.plan.category,
-                }
-                metadata.update(_season_pack_satisfaction_metadata(candidate, rule))
-                state.upsert_job(
+            submit_result = qbittorrent.submit(candidate, rule=rule)
+            status = _job_status(submit_result)
+            metadata = {
+                "title": candidate.title,
+                "rule_name": candidate.rule_name,
+                "bangumi_subject_id": rule.bangumi_subject_id,
+                "episode": _candidate_episode(candidate),
+                "submit_status": submit_result.status,
+                "qbittorrent_category": submit_result.plan.category,
+            }
+            metadata.update(_season_pack_satisfaction_metadata(candidate, rule))
+            state.upsert_job(
+                job_id,
+                dedupe_key=decision.dedupe_key,
+                status=status,
+                torrent_hash=decision.item.info_hash,
+                retry_count=0,
+                last_error=submit_result.message
+                if not submit_result.success
+                else None,
+                metadata=metadata,
+            )
+            if submit_result.success:
+                state.clear_failure(job_id, "qbittorrent")
+                state.record_seen_item(decision.item)
+            else:
+                state.record_failure(
                     job_id,
-                    dedupe_key=decision.dedupe_key,
-                    status=status,
-                    torrent_hash=decision.item.info_hash,
-                    retry_count=0,
-                    last_error=submit_result.message
-                    if not submit_result.success
-                    else None,
-                    metadata=metadata,
+                    "qbittorrent",
+                    submit_result.message,
+                    attempts=1,
+                    recoverable=submit_result.retryable,
                 )
-                if submit_result.success:
-                    state.clear_failure(job_id, "qbittorrent")
+                if not submit_result.retryable:
                     state.record_seen_item(decision.item)
-                else:
-                    state.record_failure(
-                        job_id,
-                        "qbittorrent",
-                        submit_result.message,
-                        attempts=1,
-                        recoverable=submit_result.retryable,
-                    )
-                    if not submit_result.retryable:
-                        state.record_seen_item(decision.item)
             event = NotificationEvent(
-                event_type="download_planned" if dry_run else "download_submitted",
+                event_type="download_submitted",
                 title=candidate.title,
                 message=submit_result.message,
                 job_id=job_id,
@@ -368,8 +360,8 @@ def run_once(
                 },
             )
             events.append(event)
-            webhook_result = _notify(notifier, event, dry_run=dry_run)
-            if not dry_run and webhook_result.failure is not None:
+            webhook_result = _notify(notifier, event)
+            if webhook_result.failure is not None:
                 state.record_failure(
                     webhook_result.failure.subject_id,
                     webhook_result.failure.stage,
@@ -405,8 +397,6 @@ def run_once(
                 pack_matches_by_group.setdefault(key, []).append(decision)
 
         def record_seen_pack_group(key: tuple[str, str, int]) -> None:
-            if dry_run:
-                return
             for pack_decision in pack_matches_by_group.get(key, ()):
                 state.record_seen_item(pack_decision.item)
 
@@ -421,8 +411,7 @@ def run_once(
             if candidate.feed_item.is_season_pack and _rule_allows_pack(rule):
                 key = _season_pack_satisfaction_key(candidate)
                 if key in accepted_pack_groups:
-                    if not dry_run:
-                        state.record_seen_item(decision.item)
+                    state.record_seen_item(decision.item)
                     continue
             submit_result = submit_match(decision, candidate, rule)
             if candidate.feed_item.is_season_pack and _rule_allows_pack(rule):
@@ -440,7 +429,6 @@ def run_once(
                 submit_match(decision, candidate, rule)
 
     return RunOnceResult(
-        dry_run=dry_run,
         parsed_items=len(items),
         parse_errors=parse_errors,
         candidates=tuple(outcomes),
@@ -452,15 +440,14 @@ def monitor_once(
     config_path: str | os.PathLike[str],
     snapshots: Iterable[TorrentSnapshot] = (),
     *,
-    dry_run: bool = True,
     organize: bool = True,
     dependencies: WorkflowDependencies | None = None,
     expected_job_ids: Iterable[str] | None = None,
 ) -> MonitorOnceResult:
     config = load_config(config_path)
     if organize:
-        ensure_apply_safe(config, dry_run=dry_run)
-    elif not dry_run:
+        ensure_apply_safe(config)
+    else:
         _ensure_telegram_apply_safe(config)
     deps = dependencies or WorkflowDependencies()
     notifier = (
@@ -477,11 +464,11 @@ def monitor_once(
         lambda organizer_input, loaded_config: organize_media(
             organizer_input,
             loaded_config.organizer,
-            bangumi_lookup=_bangumi_lookup(deps, dry_run=dry_run, metadata=organizer_input.metadata),
+            bangumi_lookup=_bangumi_lookup(deps, metadata=organizer_input.metadata),
             episode_parser=_organizer_episode_parser(deps, loaded_config.organizer, organizer_input),
         )
     )
-    with _monitor_state(config, dry_run=dry_run) as state:
+    with SubscriptionState(config.state.path) as state:
         expected = (
             tuple(expected_job_ids)
             if expected_job_ids is not None
@@ -498,40 +485,35 @@ def monitor_once(
         )
         organizer_results: list[OrganizerResult] = []
         organizer_inputs_by_job_id: dict[str, OrganizerInput] = {}
-        effective_config = _dry_run_organizer_config(config) if dry_run else config
         if organize:
             for organizer_input in result.organizer_inputs:
                 organizer_inputs_by_job_id[organizer_input.job_id] = organizer_input
-                organizer_result = organizer_runner(organizer_input, effective_config)
+                organizer_result = organizer_runner(organizer_input, config)
                 organizer_results.append(organizer_result)
                 _record_organizer_actions(
                     state,
                     organizer_result,
-                    dry_run=dry_run,
                     telegram_enabled=config.telegram.enabled,
                 )
         telegram_results: tuple[TelegramDispatchResult, ...] = ()
-        if not dry_run and config.telegram.enabled:
+        if config.telegram.enabled:
             telegram_results = _dispatch_pending_telegram_notifications(
                 state,
                 telegram_notifier,
                 cover_fetcher=deps.bangumi_cover_fetcher or fetch_subject_cover_url,
             )
-        if not dry_run:
-            _record_completed_satisfied_season_packs(state, config)
-        archive_events = (
-            _archive_completed_rules(state, config, deps) if not dry_run else ()
-        )
+        _record_completed_satisfied_season_packs(state, config)
+        archive_events = _archive_completed_rules(state, config, deps)
         all_events = (*result.events, *archive_events)
         webhook_results = tuple(
-            _notify(notifier, event, dry_run=dry_run)
+            _notify(notifier, event)
             for event in (
                 *all_events,
                 *[event for item in organizer_results for event in item.events],
             )
         )
         for webhook_result in webhook_results:
-            if not dry_run and webhook_result.failure is not None:
+            if webhook_result.failure is not None:
                 state.record_failure(
                     webhook_result.failure.subject_id,
                     webhook_result.failure.stage,
@@ -552,18 +534,13 @@ def monitor_once(
 def production_tick(
     config_path: str | os.PathLike[str],
     *,
-    dry_run: bool = True,
     dependencies: WorkflowDependencies | None = None,
 ) -> ProductionTickResult:
-    """Run one bounded scheduler tick, optionally applying qBittorrent monitor/organizer side effects."""
+    """Run one bounded scheduler tick applying qBittorrent monitor/organizer side effects."""
 
     config = load_config(config_path)
-    ensure_apply_safe(config, dry_run=dry_run)
+    ensure_apply_safe(config)
     deps = dependencies or WorkflowDependencies()
-    if dry_run:
-        run_result = run_once(config_path, dry_run=True, dependencies=deps)
-        return ProductionTickResult(dry_run=True, run_result=run_result)
-
     pre_active_job_ids = _active_job_ids(config)
     qbittorrent = (
         deps.qbittorrent_factory(config)
@@ -574,9 +551,8 @@ def production_tick(
         torrents = _list_monitor_torrents(qbittorrent, config)
     except RuntimeError as exc:
         return ProductionTickResult(
-            dry_run=False,
             run_result=RunOnceResult(
-                dry_run=False, parsed_items=0, parse_errors=0, candidates=(), events=()
+                parsed_items=0, parse_errors=0, candidates=(), events=()
             ),
             qbit_failure={
                 "stage": "list_torrents",
@@ -590,14 +566,12 @@ def production_tick(
     monitor_result = monitor_once(
         config_path,
         snapshots=snapshots,
-        dry_run=False,
         organize=True,
         dependencies=deps,
         expected_job_ids=pre_active_job_ids,
     )
-    run_result = run_once(config_path, dry_run=False, dependencies=deps)
+    run_result = run_once(config_path, dependencies=deps)
     return ProductionTickResult(
-        dry_run=False,
         run_result=run_result,
         torrent_count=len(torrents),
         snapshots=snapshots,
@@ -674,13 +648,10 @@ def organize_once(
     config_path: str | os.PathLike[str],
     organizer_input: OrganizerInput,
     *,
-    dry_run: bool = True,
     dependencies: WorkflowDependencies | None = None,
 ) -> OrganizeOnceResult:
     config = load_config(config_path)
-    ensure_apply_safe(
-        config, dry_run=dry_run or config.organizer.mode is OrganizerMode.DRY_RUN
-    )
+    ensure_apply_safe(config)
     deps = dependencies or WorkflowDependencies()
     notifier = (
         deps.webhook_factory(config)
@@ -691,100 +662,19 @@ def organize_once(
         lambda item, loaded_config: organize_media(
             item,
             loaded_config.organizer,
-            bangumi_lookup=_bangumi_lookup(deps, dry_run=dry_run, metadata=item.metadata),
+            bangumi_lookup=_bangumi_lookup(deps, metadata=item.metadata),
             episode_parser=_organizer_episode_parser(deps, loaded_config.organizer, item),
         )
     )
-    effective_config = _dry_run_organizer_config(config) if dry_run else config
-    result = organizer_runner(organizer_input, effective_config)
-    with SubscriptionState(_state_path(config, dry_run=dry_run)) as state:
+    result = organizer_runner(organizer_input, config)
+    with SubscriptionState(config.state.path) as state:
         _record_organizer_actions(
-            state, result, dry_run=dry_run, telegram_enabled=False
+            state, result, telegram_enabled=False
         )
     webhook_results = tuple(
-        _notify(notifier, event, dry_run=dry_run) for event in result.events
+        _notify(notifier, event) for event in result.events
     )
     return OrganizeOnceResult(result, webhook_results)
-
-
-def plan_completed_dry_run(
-    config_path: str | os.PathLike[str],
-    run_result: RunOnceResult,
-    source_path: str,
-    *,
-    dependencies: WorkflowDependencies | None = None,
-) -> MonitorOnceResult:
-    config = load_config(config_path)
-    deps = dependencies or WorkflowDependencies()
-    notifier = (
-        deps.webhook_factory(config)
-        if deps.webhook_factory
-        else WebhookNotifier(config.webhook)
-    )
-    organizer_runner = deps.organizer_runner or (
-        lambda organizer_input, loaded_config: organize_media(
-            organizer_input,
-            loaded_config.organizer,
-            bangumi_lookup=_bangumi_lookup(deps, dry_run=True, metadata=organizer_input.metadata),
-            episode_parser=_organizer_episode_parser(deps, loaded_config.organizer, organizer_input),
-        )
-    )
-    snapshots = _completed_snapshots_from_run_result(run_result, source_path)
-    with SubscriptionState(":memory:") as state:
-        for outcome in run_result.candidates:
-            if (
-                outcome.submit_result is None
-                or outcome.candidate.feed_item.info_hash is None
-            ):
-                continue
-            state.upsert_job(
-                outcome.job_id,
-                dedupe_key=outcome.dedupe_decision.dedupe_key,
-                status=DownloadJobStatus.PENDING,
-                torrent_hash=outcome.candidate.feed_item.info_hash,
-                retry_count=0,
-                metadata={
-                    "title": outcome.candidate.title,
-                    "rule_name": outcome.candidate.rule_name,
-                    "episode": _candidate_episode(outcome.candidate),
-                    "dry_run": True,
-                    "submit_status": outcome.submit_result.status,
-                },
-            )
-        expected = tuple(
-            outcome.job_id
-            for outcome in run_result.candidates
-            if outcome.submit_result is not None
-        )
-        result = monitor_downloads(
-            state,
-            snapshots,
-            config.retry,
-            expected_job_ids=expected,
-        )
-        organizer_results: list[OrganizerResult] = []
-        for organizer_input in result.organizer_inputs:
-            organizer_result = organizer_runner(
-                organizer_input, _dry_run_organizer_config(config)
-            )
-            organizer_results.append(organizer_result)
-            _record_organizer_actions(
-                state, organizer_result, dry_run=True, telegram_enabled=False
-            )
-        webhook_results = tuple(
-            _notify(notifier, event, dry_run=True)
-            for event in (
-                *result.events,
-                *[event for item in organizer_results for event in item.events],
-            )
-        )
-    return MonitorOnceResult(
-        result.organizer_inputs,
-        result.events,
-        result.failures,
-        tuple(organizer_results),
-        webhook_results,
-    )
 
 
 def list_state(config_path: str | os.PathLike[str]) -> StateSummary:
@@ -830,6 +720,12 @@ def list_state(config_path: str | os.PathLike[str]) -> StateSummary:
     )
 
 
+def _copy_configured_state_if_available(
+    source_path: str | os.PathLike[str], state: SubscriptionState
+) -> bool:
+    return state.copy_from_readonly(source_path)
+
+
 def audit_ingestion(config_path: str | os.PathLike[str]) -> dict[str, object]:
     config = load_config(config_path)
     with SubscriptionState(":memory:") as state:
@@ -866,7 +762,7 @@ def _audit_job_organization(job: dict[str, object]) -> list[dict[str, object]]:
     if (
         status in {DownloadJobStatus.COMPLETED.value, DownloadJobStatus.SUBMITTED.value}
         and source_path
-        and organizer_outcome in {None, "", "planned", "dry-run"}
+        and organizer_outcome in {None, "", "planned"}
     ):
         return [
             _audit_finding(
@@ -1129,35 +1025,12 @@ def _has_seen_qbittorrent_retry_suppression(
     )
 
 
-def _monitor_state(config: PluginConfig, *, dry_run: bool) -> SubscriptionState:
-    if not dry_run:
-        return SubscriptionState(config.state.path)
-    state = SubscriptionState(":memory:")
-    _copy_configured_state_if_available(Path(config.state.path), state)
-    return state
-
-
-def _run_once_state(config: PluginConfig, *, dry_run: bool) -> SubscriptionState:
-    if not dry_run:
-        return SubscriptionState(config.state.path)
-    state = SubscriptionState(":memory:")
-    _copy_configured_state_if_available(Path(config.state.path), state)
-    return state
-
-
-def _copy_configured_state_if_available(
-    source_path: Path, destination: SubscriptionState
-) -> None:
-    if destination.copy_from_readonly(source_path):
-        destination.initialize_schema()
-
-
 def scheduler_tick(
     config_path: str | os.PathLike[str],
     *,
     dependencies: WorkflowDependencies | None = None,
-) -> RunOnceResult:
-    return run_once(config_path, dry_run=True, dependencies=dependencies)
+) -> ProductionTickResult:
+    return production_tick(config_path, dependencies=dependencies)
 
 
 def scheduling_guidance(config: PluginConfig) -> str:
@@ -1169,9 +1042,7 @@ def scheduling_guidance(config: PluginConfig) -> str:
     return f"Call scheduler_tick once every {config.polling.interval_minutes} minutes{jitter}; do not install an in-process infinite loop."
 
 
-def ensure_apply_safe(config: PluginConfig, *, dry_run: bool) -> None:
-    if dry_run:
-        return
+def ensure_apply_safe(config: PluginConfig) -> None:
     if not config.qbittorrent.username_env or not config.qbittorrent.password_env:
         raise ConfigError(
             "apply mode requires qbittorrent username_env and password_env"
@@ -1428,24 +1299,10 @@ def _season_number(title: str) -> int:
     return 1
 
 
-def _job_status(result: QbittorrentSubmitResult, *, dry_run: bool) -> DownloadJobStatus:
-    if result.success and dry_run:
-        return DownloadJobStatus.PENDING
+def _job_status(result: QbittorrentSubmitResult) -> DownloadJobStatus:
     if result.success:
         return DownloadJobStatus.SUBMITTED
     return DownloadJobStatus.FAILED if not result.retryable else DownloadJobStatus.ERROR
-
-
-def _dry_run_organizer_config(config: PluginConfig) -> PluginConfig:
-    if config.organizer.mode is OrganizerMode.DRY_RUN:
-        return config
-    organizer = OrganizerConfig(
-        mode=OrganizerMode.DRY_RUN,
-        library_root=config.organizer.library_root,
-        staging_root=config.organizer.staging_root,
-        episode_parser=config.organizer.episode_parser,
-    )
-    return replace(config, organizer=organizer)
 
 
 def _organizer_episode_parser(
@@ -1466,12 +1323,10 @@ def _organizer_episode_parser(
 
 
 def _bangumi_lookup(
-    deps: WorkflowDependencies, *, dry_run: bool, metadata: dict[str, object] | None = None
+    deps: WorkflowDependencies, *, metadata: dict[str, object] | None = None
 ) -> BangumiLookup | None:
     if deps.bangumi_lookup is not None:
         return deps.bangumi_lookup
-    if dry_run:
-        return None
     fallback_lookup = lookup_chinese_title
     subject_id = _integral_episode((metadata or {}).get("bangumi_subject_id"))
     if subject_id is None:
@@ -1481,10 +1336,6 @@ def _bangumi_lookup(
         return fetch_subject_title(subject_id) or (fallback_lookup(title) if fallback_lookup is not None else None)
 
     return lookup
-
-
-def _state_path(config: PluginConfig, *, dry_run: bool) -> str | Path:
-    return ":memory:" if dry_run else config.state.path
 
 
 def _archived_rule_names(config: PluginConfig) -> frozenset[str]:
@@ -1628,23 +1479,8 @@ def _candidate_episode(candidate: ReleaseCandidate) -> int | None:
     return int(bracketed.group("episode")) if bracketed else None
 
 
-def _notify(
-    notifier: WebhookNotifier, event: NotificationEvent, *, dry_run: bool
-) -> WebhookDispatchResult:
-    if not dry_run:
-        return notifier.notify(event, dry_run=False)
-    plan = WebhookDeliveryPlan(
-        url="",
-        redacted_url="<dry-run>",
-        payload=build_webhook_payload(event, dry_run=True),
-        dry_run=True,
-    )
-    return WebhookDispatchResult(
-        success=True,
-        status="planned",
-        message="Dry-run planned webhook delivery without HTTP mutation",
-        plan=plan,
-    )
+def _notify(notifier: WebhookNotifier, event: NotificationEvent) -> WebhookDispatchResult:
+    return notifier.notify(event)
 
 
 def _dispatch_pending_telegram_notifications(
@@ -1864,16 +1700,15 @@ def _record_organizer_actions(
     state: SubscriptionState,
     result: OrganizerResult,
     *,
-    dry_run: bool,
     telegram_enabled: bool,
 ) -> None:
     for action in result.actions:
-        outcome = "dry-run" if dry_run else action.status
+        outcome = action.status
         destination_path = str(action.destination_path) if action.destination_path else None
         job = state.get_job(result.job_id)
         if job is not None:
             metadata = dict(job["metadata"])
-            applied = not dry_run and action.status == "applied"
+            applied = action.status == "applied"
             if applied and action.episode is not None:
                 # During organizer action recording, the candidate-level legacy scalar
                 # metadata["episode"] is not proof that that episode was organized.

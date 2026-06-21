@@ -71,7 +71,6 @@ class QbittorrentSubmissionPlan:
     tags: tuple[str, ...]
     save_path: str | None
     endpoint: str
-    dry_run: bool = True
 
     def payload(self) -> dict[str, str]:
         values: dict[str, str] = {}
@@ -102,7 +101,6 @@ class QbittorrentSubmitResult:
     plan: QbittorrentSubmissionPlan
     retryable: bool = False
     duplicate: bool = False
-    dry_run: bool = False
     error: QbittorrentError | None = None
     http_status: int | None = None
 
@@ -162,17 +160,8 @@ class QbittorrentClient:
         candidate: ReleaseCandidate,
         *,
         rule: SubscriptionRule | None = None,
-        dry_run: bool = False,
     ) -> QbittorrentSubmitResult:
-        plan = plan_qbittorrent_submission(candidate, self.config, rule=rule, dry_run=dry_run)
-        if dry_run:
-            return QbittorrentSubmitResult(
-                success=True,
-                status="planned",
-                message="Dry-run planned qBittorrent submission without HTTP mutation",
-                plan=plan,
-                dry_run=True,
-            )
+        plan = plan_qbittorrent_submission(candidate, self.config, rule=rule)
         if plan.source is None:
             return _failure(plan, "validation", "Candidate has no magnet URI or torrent URL", retryable=False)
 
@@ -313,7 +302,6 @@ def plan_qbittorrent_submission(
     config: QbittorrentConfig,
     *,
     rule: SubscriptionRule | None = None,
-    dry_run: bool = True,
 ) -> QbittorrentSubmissionPlan:
     item = candidate.feed_item
     return QbittorrentSubmissionPlan(
@@ -324,7 +312,6 @@ def plan_qbittorrent_submission(
         tags=config.tags,
         save_path=(rule.save_path if rule and rule.save_path else config.save_path),
         endpoint=config.endpoint,
-        dry_run=dry_run,
     )
 
 

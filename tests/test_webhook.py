@@ -30,7 +30,7 @@ def test_disabled_webhook_makes_no_http_calls():
     transport = MockTransport([WebhookHttpResponse(status=200, body="ok")])
     notifier = WebhookNotifier(WebhookConfig(enabled=False, url_env="DMHY_WEBHOOK_URL"), transport=transport)
 
-    result = notifier.notify(_event(), dry_run=True)
+    result = notifier.notify(_event())
 
     assert result.disabled is True
     assert result.success is True
@@ -55,7 +55,6 @@ def test_webhook_delivery_payload_includes_required_fields(monkeypatch):
         qbittorrent_hash="hash-1",
         status="submitted",
         failure_reason=None,
-        dry_run=False,
     )
 
     payload = json.loads(transport.requests[0].data.decode("utf-8"))
@@ -63,7 +62,6 @@ def test_webhook_delivery_payload_includes_required_fields(monkeypatch):
     assert result.status == "sent"
     assert transport.requests[0].headers["Content-Type"] == "application/json"
     assert payload == {
-        "dry_run": False,
         "event_type": "download_completed",
         "failure_reason": None,
         "message": "Completed",

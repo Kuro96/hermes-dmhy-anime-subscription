@@ -23,7 +23,6 @@ from .workflow import (
 
 TOOL_NAMES = (
     "dmhy.validate_config",
-    "dmhy.run_once_dry_run",
     "dmhy.run_once_apply",
     "dmhy.monitor_once",
     "dmhy.organize_once",
@@ -46,13 +45,8 @@ def register(ctx):
     _register_tool(ctx, "dmhy.validate_config", validate_config)
     _register_tool(
         ctx,
-        "dmhy.run_once_dry_run",
-        lambda config_path, **kwargs: run_once(config_path, dry_run=True, **kwargs),
-    )
-    _register_tool(
-        ctx,
         "dmhy.run_once_apply",
-        lambda config_path, **kwargs: run_once(config_path, dry_run=False, **kwargs),
+        lambda config_path, **kwargs: run_once(config_path, **kwargs),
     )
     _register_tool(ctx, "dmhy.monitor_once", monitor_once)
     _register_tool(ctx, "dmhy.organize_once", organize_once)

@@ -27,7 +27,6 @@ from hermes_dmhy_anime_subscription.workflow import (
     list_state,
     monitor_once,
     organize_once,
-    plan_completed_dry_run,
     production_tick,
     snapshots_from_qbittorrent_torrents,
     retry_failed_item,
@@ -40,22 +39,31 @@ FIXTURE_RSS = REPO_ROOT / "fixtures" / "dmhy" / "rss-anime.xml"
 VALID_CONFIG = REPO_ROOT / "fixtures" / "config" / "valid.example.json"
 
 
+@pytest.fixture(autouse=True)
+def _apply_environment(monkeypatch):
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "fixture-user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "fixture-pass")
+    monkeypatch.setenv("DMHY_WEBHOOK_URL", "https://hooks.example.invalid/dmhy")
+
+
 class FakeQbittorrentClient:
     def __init__(self):
         self.submissions = []
 
-    def submit(self, candidate, *, rule=None, dry_run=False):
-        self.submissions.append((candidate, rule, dry_run))
+    def submit(self, candidate, *, rule=None):
+        self.submissions.append((candidate, rule))
         plan = plan_qbittorrent_submission(
-            candidate, load_config(VALID_CONFIG).qbittorrent, rule=rule, dry_run=dry_run
+            candidate, load_config(VALID_CONFIG).qbittorrent, rule=rule
         )
         return QbittorrentSubmitResult(
             success=True,
-            status="planned" if dry_run else "submitted",
-            message="fake planned submission" if dry_run else "fake submitted torrent",
+            status="submitted",
+            message="fake submitted torrent",
             plan=plan,
-            dry_run=dry_run,
         )
+
+    def list_torrents(self, *, category=None, all_categories=False):
+        return ()
 
 
 class FakeProductionQbittorrentClient(FakeQbittorrentClient):
@@ -86,11 +94,11 @@ class SequenceQbittorrentClient:
         self.statuses = list(statuses)
         self.submissions = []
 
-    def submit(self, candidate, *, rule=None, dry_run=False):
-        self.submissions.append((candidate, rule, dry_run))
+    def submit(self, candidate, *, rule=None):
+        self.submissions.append((candidate, rule))
         success, status, message, retryable = self.statuses.pop(0)
         plan = plan_qbittorrent_submission(
-            candidate, self.config.qbittorrent, rule=rule, dry_run=dry_run
+            candidate, self.config.qbittorrent, rule=rule
         )
         return QbittorrentSubmitResult(
             success=success,
@@ -98,100 +106,7 @@ class SequenceQbittorrentClient:
             message=message,
             plan=plan,
             retryable=retryable,
-            dry_run=dry_run,
         )
-
-
-def test_e2e_dry_run_plans_rss_rules_submit_organizer_and_webhook_without_external_mutation(
-    tmp_path,
-):
-    config_path = _config(tmp_path)
-    source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
-    source.parent.mkdir()
-    source.write_bytes(b"video")
-    fake_qbit = FakeQbittorrentClient()
-
-    run_result = run_once(
-        config_path,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
-            qbittorrent_factory=lambda _config: fake_qbit,
-        ),
-    )
-
-    assert run_result.parsed_items == 1
-    assert run_result.planned_submissions == 1
-    assert fake_qbit.submissions[0][2] is True
-    assert run_result.candidates[0].webhook_results[0].status == "planned"
-
-    monitor_result = plan_completed_dry_run(
-        config_path,
-        run_result,
-        str(source),
-    )
-
-    assert len(monitor_result.organizer_results) == 1
-    action = monitor_result.organizer_results[0].actions[0]
-    assert action.status == "planned"
-    assert source.exists()
-    assert action.destination_path is not None
-    assert not action.destination_path.exists()
-    assert action.destination_path.resolve(strict=False).is_relative_to(
-        (tmp_path / "library").resolve(strict=False)
-    )
-
-
-def test_run_once_dry_run_is_repeatable_and_does_not_create_state(tmp_path):
-    config_path = _config(tmp_path)
-    state_path = tmp_path / "state.sqlite3"
-    fake_qbit = FakeQbittorrentClient()
-    dependencies = WorkflowDependencies(
-        feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
-        qbittorrent_factory=lambda _config: fake_qbit,
-    )
-
-    first = run_once(config_path, dependencies=dependencies)
-    second = run_once(config_path, dependencies=dependencies)
-
-    assert len(first.candidates) == 1
-    assert len(second.candidates) == 1
-    assert len(fake_qbit.submissions) == 2
-    assert not state_path.exists()
-
-
-def test_run_once_dry_run_skips_non_actionable_manga_empty_enclosure_without_parse_error(tmp_path):
-    config_path = _config(tmp_path)
-    fake_qbit = FakeQbittorrentClient()
-    manga_rss = """<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-  <channel>
-    <title>DMHY Keyword RSS</title>
-    <item>
-      <title>[OldMangaGroup] Example Manga Chapter 12</title>
-      <link>https://share.dmhy.org/topics/view/123456_example_manga.html</link>
-      <pubDate>Sun, 24 May 2026 10:30:00 +0000</pubDate>
-      <description>Old manga entry from a keyword feed</description>
-      <author>OldMangaGroup</author>
-      <category>漫畫</category>
-      <guid>https://share.dmhy.org/topics/view/123456_example_manga.html</guid>
-      <enclosure url="" type="application/x-bittorrent" />
-    </item>
-  </channel>
-</rss>
-"""
-
-    result = run_once(
-        config_path,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: manga_rss,
-            qbittorrent_factory=lambda _config: fake_qbit,
-        ),
-    )
-
-    assert result.parsed_items == 0
-    assert result.parse_errors == 0
-    assert result.candidates == ()
-    assert fake_qbit.submissions == []
 
 
 def test_run_once_does_not_mark_unmatched_global_feed_item_seen_before_specialized_feed(
@@ -211,8 +126,7 @@ def test_run_once_does_not_mark_unmatched_global_feed_item_seen_before_specializ
 
     result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 episode="08",
                 info_hash="8888888888888888888888888888888888888888",
@@ -226,245 +140,6 @@ def test_run_once_does_not_mark_unmatched_global_feed_item_seen_before_specializ
     assert len(fake_qbit.submissions) == 1
     assert fake_qbit.submissions[0][0].feed_item.source_feed == "tongari-special"
     assert result.candidates[0].status == DownloadJobStatus.SUBMITTED.value
-
-
-def test_run_once_dry_run_does_not_migrate_existing_old_schema_state(tmp_path):
-    config_path = _config(tmp_path)
-    state_path = tmp_path / "state.sqlite3"
-    with sqlite3.connect(state_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE seen_items (
-                dedupe_key TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                link TEXT NOT NULL,
-                first_seen_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL
-            )
-            """
-        )
-        before = _sqlite_schema_objects(connection)
-
-    result = run_once(
-        config_path,
-        dry_run=True,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
-            qbittorrent_factory=lambda _config: FakeQbittorrentClient(),
-        ),
-    )
-
-    assert len(result.candidates) == 1
-    with sqlite3.connect(state_path) as connection:
-        after = _sqlite_schema_objects(connection)
-    assert after == before == (("table", "seen_items"),)
-
-
-def test_run_once_dry_run_supports_old_schema_with_jobs_without_migrating_state(
-    tmp_path,
-):
-    config_path = _config(tmp_path)
-    state_path = tmp_path / "state.sqlite3"
-    with sqlite3.connect(state_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE jobs (
-                job_id TEXT PRIMARY KEY,
-                dedupe_key TEXT NOT NULL,
-                torrent_hash TEXT,
-                status TEXT NOT NULL,
-                retry_count INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT,
-                organizer_outcome TEXT,
-                metadata_json TEXT NOT NULL DEFAULT '{}',
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        before = _sqlite_schema_objects(connection)
-
-    result = run_once(
-        config_path,
-        dry_run=True,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
-            qbittorrent_factory=lambda _config: FakeQbittorrentClient(),
-        ),
-    )
-
-    assert len(result.candidates) == 1
-    with sqlite3.connect(state_path) as connection:
-        after = _sqlite_schema_objects(connection)
-    assert after == before == (("table", "jobs"),)
-
-
-def test_run_once_dry_run_reads_satisfied_pack_only_state_without_migrating_state(
-    tmp_path,
-):
-    config_path = _config(tmp_path)
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
-    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
-    config_path.write_text(json.dumps(raw), encoding="utf-8")
-    state_path = tmp_path / "state.sqlite3"
-    with sqlite3.connect(state_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE satisfied_season_packs (
-                rule_name TEXT NOT NULL,
-                series_key TEXT NOT NULL,
-                season INTEGER NOT NULL,
-                job_id TEXT NOT NULL,
-                dedupe_key TEXT NOT NULL,
-                recorded_at TEXT NOT NULL,
-                PRIMARY KEY (rule_name, series_key, season)
-            )
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO satisfied_season_packs (rule_name, series_key, season, job_id, dedupe_key, recorded_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                "example-show",
-                "example anime",
-                1,
-                "job-pack",
-                "infohash:pack",
-                "2026-05-31T00:00:00+00:00",
-            ),
-        )
-        before_schema = _sqlite_schema_objects(connection)
-        before_rows = tuple(
-            connection.execute("SELECT * FROM satisfied_season_packs").fetchall()
-        )
-    fake_qbit = FakeQbittorrentClient()
-
-    result = run_once(
-        config_path,
-        dry_run=True,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: _episode_rss(
-                episode="02",
-                info_hash="3333333333333333333333333333333333333333",
-                guid="episode-200003",
-            ),
-            qbittorrent_factory=lambda _config: fake_qbit,
-        ),
-    )
-
-    assert result.parsed_items == 1
-    assert result.candidates == ()
-    assert fake_qbit.submissions == []
-    with sqlite3.connect(state_path) as connection:
-        after_schema = _sqlite_schema_objects(connection)
-        after_rows = tuple(
-            connection.execute("SELECT * FROM satisfied_season_packs").fetchall()
-        )
-    assert after_schema == before_schema == (("table", "satisfied_season_packs"),)
-    assert after_rows == before_rows
-
-
-def test_run_once_dry_run_suppresses_episode_from_partial_satisfied_pack_state(
-    tmp_path,
-):
-    config_path = _config(tmp_path)
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
-    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
-    config_path.write_text(json.dumps(raw), encoding="utf-8")
-    state_path = tmp_path / "state.sqlite3"
-    with sqlite3.connect(state_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE satisfied_season_packs (
-                rule_name TEXT NOT NULL,
-                series_key TEXT NOT NULL,
-                season INTEGER NOT NULL,
-                PRIMARY KEY (rule_name, series_key, season)
-            )
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO satisfied_season_packs (rule_name, series_key, season)
-            VALUES (?, ?, ?)
-            """,
-            ("example-show", "example anime", 1),
-        )
-        before_schema = _sqlite_schema_objects(connection)
-        before_rows = tuple(
-            connection.execute("SELECT * FROM satisfied_season_packs").fetchall()
-        )
-    fake_qbit = FakeQbittorrentClient()
-
-    result = run_once(
-        config_path,
-        dry_run=True,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: _episode_rss(
-                episode="02",
-                info_hash="3333333333333333333333333333333333333333",
-                guid="episode-200003",
-            ),
-            qbittorrent_factory=lambda _config: fake_qbit,
-        ),
-    )
-
-    assert result.parsed_items == 1
-    assert result.candidates == ()
-    assert fake_qbit.submissions == []
-    with sqlite3.connect(state_path) as connection:
-        after_schema = _sqlite_schema_objects(connection)
-        after_rows = tuple(
-            connection.execute("SELECT * FROM satisfied_season_packs").fetchall()
-        )
-    assert after_schema == before_schema == (("table", "satisfied_season_packs"),)
-    assert after_rows == before_rows
-
-
-def test_production_tick_dry_run_does_not_create_or_migrate_configured_state(tmp_path):
-    config_path = _config(tmp_path)
-    state_path = tmp_path / "state.sqlite3"
-    qbit = FakeProductionQbittorrentClient(())
-    dependencies = WorkflowDependencies(
-        feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
-        qbittorrent_factory=lambda _config: qbit,
-    )
-
-    missing_result = production_tick(
-        config_path, dry_run=True, dependencies=dependencies
-    )
-
-    assert len(missing_result.run_result.candidates) == 1
-    assert not state_path.exists()
-    assert qbit.list_calls == []
-
-    with sqlite3.connect(state_path) as connection:
-        connection.execute(
-            """
-            CREATE TABLE seen_items (
-                dedupe_key TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                link TEXT NOT NULL,
-                first_seen_at TEXT NOT NULL,
-                last_seen_at TEXT NOT NULL
-            )
-            """
-        )
-        before = _sqlite_schema_objects(connection)
-
-    existing_result = production_tick(
-        config_path, dry_run=True, dependencies=dependencies
-    )
-
-    assert len(existing_result.run_result.candidates) == 1
-    assert qbit.list_calls == []
-    with sqlite3.connect(state_path) as connection:
-        after = _sqlite_schema_objects(connection)
-    assert after == before == (("table", "seen_items"),)
 
 
 def test_retryable_qbittorrent_submit_failure_remains_eligible_until_success(
@@ -486,7 +161,7 @@ def test_retryable_qbittorrent_submit_failure_remains_eligible_until_success(
         qbittorrent_factory=lambda _config: fake_qbit,
     )
 
-    first = run_once(config_path, dry_run=False, dependencies=dependencies)
+    first = run_once(config_path, dependencies=dependencies)
 
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         assert not state.has_seen_item(first.candidates[0].dedupe_decision.dedupe_key)
@@ -495,7 +170,7 @@ def test_retryable_qbittorrent_submit_failure_remains_eligible_until_success(
     assert failed_job["status"] == DownloadJobStatus.ERROR.value
 
     assert first.candidates[0].status == DownloadJobStatus.ERROR.value
-    second = run_once(config_path, dry_run=False, dependencies=dependencies)
+    second = run_once(config_path, dependencies=dependencies)
 
     assert second.candidates[0].status == DownloadJobStatus.SUBMITTED.value
     assert len(fake_qbit.submissions) == 2
@@ -527,8 +202,7 @@ def test_retryable_season_pack_submit_failure_does_not_suppress_later_episode(
 
     pack_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _season_pack_rss(
                 info_hash="2222222222222222222222222222222222222222",
                 guid="season-pack-200002",
@@ -538,8 +212,7 @@ def test_retryable_season_pack_submit_failure_does_not_suppress_later_episode(
     )
     later_episode = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 episode="02",
                 info_hash="3333333333333333333333333333333333333333",
@@ -599,8 +272,8 @@ def test_retryable_season_pack_submit_failure_is_cleared_after_same_pack_succeed
         qbittorrent_factory=lambda _config: fake_qbit,
     )
 
-    first = run_once(config_path, dry_run=False, dependencies=dependencies)
-    second = run_once(config_path, dry_run=False, dependencies=dependencies)
+    first = run_once(config_path, dependencies=dependencies)
+    second = run_once(config_path, dependencies=dependencies)
 
     assert len(first.candidates) == 1
     assert first.candidates[0].status == DownloadJobStatus.ERROR.value
@@ -642,8 +315,7 @@ def test_retryable_same_feed_season_pack_submit_failure_falls_back_to_episode(
 
     result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_and_pack_rss(),
             qbittorrent_factory=lambda _config: fake_qbit,
         ),
@@ -697,8 +369,8 @@ def test_terminal_same_feed_season_pack_submit_failure_is_deduped_after_episode_
         qbittorrent_factory=lambda _config: fake_qbit,
     )
 
-    first = run_once(config_path, dry_run=False, dependencies=dependencies)
-    second = run_once(config_path, dry_run=False, dependencies=dependencies)
+    first = run_once(config_path, dependencies=dependencies)
+    second = run_once(config_path, dependencies=dependencies)
 
     assert first.parsed_items == 2
     assert len(first.candidates) == 2
@@ -766,8 +438,7 @@ def test_retryable_same_feed_pack_failure_flushes_fallback_before_unrelated_item
 
     result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _same_feed_pack_failure_fallback_order_rss(),
             qbittorrent_factory=lambda _config: fake_qbit,
         ),
@@ -827,8 +498,8 @@ def test_same_feed_pack_failure_marked_seen_by_later_same_group_pack_is_not_retr
         qbittorrent_factory=lambda _config: fake_qbit,
     )
 
-    result = run_once(config_path, dry_run=False, dependencies=dependencies)
-    retry_result = run_once(config_path, dry_run=False, dependencies=dependencies)
+    result = run_once(config_path, dependencies=dependencies)
+    retry_result = run_once(config_path, dependencies=dependencies)
 
     assert result.parsed_items == 3
     assert len(result.candidates) == 2
@@ -880,8 +551,7 @@ def test_new_later_same_group_replacement_pack_remains_eligible_across_runs(
 
     first = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _season_pack_rss(
                 info_hash=first_pack_hash,
                 guid="season-pack-200051",
@@ -891,8 +561,7 @@ def test_new_later_same_group_replacement_pack_remains_eligible_across_runs(
     )
     second = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _season_pack_rss(
                 info_hash=second_pack_hash,
                 guid="season-pack-200052",
@@ -939,10 +608,9 @@ def test_successful_same_feed_pack_suppresses_later_same_group_pack_across_runs(
 
     first = run_once(
         config_path,
-        dry_run=False,
-        dependencies=dependencies,
+                dependencies=dependencies,
     )
-    second = run_once(config_path, dry_run=False, dependencies=dependencies)
+    second = run_once(config_path, dependencies=dependencies)
 
     assert first.parsed_items == 3
     assert len(first.candidates) == 1
@@ -997,9 +665,9 @@ def test_run_once_apply_active_pack_suppresses_later_episode_until_completion(
         ),
         qbittorrent_factory=lambda _config: fake_qbit,
     )
-    result = run_once(config_path, dry_run=False, dependencies=pack_dependencies)
+    result = run_once(config_path, dependencies=pack_dependencies)
     pre_completion_episode = run_once(
-        config_path, dry_run=False, dependencies=pre_completion_episode_dependencies
+        config_path, dependencies=pre_completion_episode_dependencies
     )
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         assert state.list_satisfied_season_packs() == ()
@@ -1013,13 +681,12 @@ def test_run_once_apply_active_pack_suppresses_later_episode_until_completion(
                 progress=1.0,
             ),
         ),
-        dry_run=False,
-        organize=False,
+                organize=False,
     )
     post_completion_episode = run_once(
-        config_path, dry_run=False, dependencies=post_completion_episode_dependencies
+        config_path, dependencies=post_completion_episode_dependencies
     )
-    later_pack = run_once(config_path, dry_run=False, dependencies=pack_v2_dependencies)
+    later_pack = run_once(config_path, dependencies=pack_v2_dependencies)
 
     assert result.parsed_items == 2
     assert len(result.candidates) == 1
@@ -1061,64 +728,6 @@ def test_run_once_apply_active_pack_suppresses_later_episode_until_completion(
         }
 
 
-def test_run_once_dry_run_active_pack_suppresses_later_episode_without_mutating_state(
-    tmp_path,
-):
-    config_path = _config(tmp_path, organizer_mode="move")
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["subscriptions"]["rules"][0]["episode_mode"] = "both"
-    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
-    config_path.write_text(json.dumps(raw), encoding="utf-8")
-    state_path = tmp_path / "state.sqlite3"
-    fake_qbit = FakeQbittorrentClient()
-    episode_hash = "3333333333333333333333333333333333333333"
-
-    with SubscriptionState(state_path) as state:
-        state.upsert_job(
-            "job-active-season-pack",
-            dedupe_key="infohash:2222222222222222222222222222222222222222",
-            status=DownloadJobStatus.SUBMITTED,
-            torrent_hash="2222222222222222222222222222222222222222",
-            metadata={
-                "title": "[ExampleSub] Example Anime 季度全集 [1080p]",
-                "rule_name": "example-show",
-                "season_pack_satisfaction": {
-                    "rule_name": "example-show",
-                    "series_key": "example anime",
-                    "season": 1,
-                },
-            },
-        )
-    with sqlite3.connect(state_path) as connection:
-        before_schema = _sqlite_schema_objects(connection)
-
-    result = run_once(
-        config_path,
-        dry_run=True,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: _episode_rss(
-                episode="02",
-                info_hash=episode_hash,
-                guid="episode-200003",
-            ),
-            qbittorrent_factory=lambda _config: fake_qbit,
-        ),
-    )
-
-    assert result.parsed_items == 1
-    assert result.candidates == ()
-    assert fake_qbit.submissions == []
-    with sqlite3.connect(state_path) as connection:
-        after_schema = _sqlite_schema_objects(connection)
-    assert after_schema == before_schema
-    with SubscriptionState(state_path) as state:
-        job = state.get_job("job-active-season-pack")
-        assert job is not None
-        assert job["status"] == DownloadJobStatus.SUBMITTED.value
-        assert state.list_satisfied_season_packs() == ()
-        assert not state.has_seen_item(f"infohash:{episode_hash}")
-
-
 def test_run_once_pack_suppressed_match_dedupes_later_same_infohash_item(
     tmp_path,
 ):
@@ -1145,8 +754,7 @@ def test_run_once_pack_suppressed_match_dedupes_later_same_infohash_item(
 
     result = run_once(
         config_path,
-        dry_run=True,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _same_infohash_pack_suppressed_then_other_rss(
                 duplicate_hash
             ),
@@ -1172,8 +780,7 @@ def test_run_once_completed_numbered_sequel_pack_does_not_suppress_base_series_e
 
     pack_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _season_pack_rss(
                 info_hash="6666666666666666666666666666666666666666",
                 guid="season-pack-200006",
@@ -1192,13 +799,11 @@ def test_run_once_completed_numbered_sequel_pack_does_not_suppress_base_series_e
                 progress=1.0,
             ),
         ),
-        dry_run=False,
-        organize=False,
+                organize=False,
     )
     episode_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 episode="01",
                 info_hash="7777777777777777777777777777777777777777",
@@ -1237,8 +842,7 @@ def test_run_once_completed_numeric_series_pack_suppresses_later_episode(
 
     pack_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _season_pack_rss(
                 info_hash="8686868686868686868686868686868686868686",
                 guid="season-pack-86",
@@ -1257,13 +861,11 @@ def test_run_once_completed_numeric_series_pack_suppresses_later_episode(
                 progress=1.0,
             ),
         ),
-        dry_run=False,
-        organize=False,
+                organize=False,
     )
     episode_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 episode="01",
                 info_hash="8787878787878787878787878787878787878787",
@@ -1303,8 +905,7 @@ def test_run_once_completed_bracketed_numeric_series_pack_suppresses_later_episo
 
     pack_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _season_pack_rss(
                 info_hash="8989898989898989898989898989898989898989",
                 guid="season-pack-bracketed-86",
@@ -1323,13 +924,11 @@ def test_run_once_completed_bracketed_numeric_series_pack_suppresses_later_episo
                 progress=1.0,
             ),
         ),
-        dry_run=False,
-        organize=False,
+                organize=False,
     )
     episode_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 episode="01",
                 info_hash="9090909090909090909090909090909090909090",
@@ -1369,8 +968,7 @@ def test_run_once_numbered_sequel_range_suppresses_same_numbered_sequel_episode_
 
     in_feed_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _numbered_sequel_episode_and_pack_rss(
                 episode_title=sequel_episode_title
             ),
@@ -1387,13 +985,11 @@ def test_run_once_numbered_sequel_range_suppresses_same_numbered_sequel_episode_
                 progress=1.0,
             ),
         ),
-        dry_run=False,
-        organize=False,
+                organize=False,
     )
     after_completion_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 title=sequel_episode_title,
                 episode="01",
@@ -1434,8 +1030,7 @@ def test_run_once_base_range_suppresses_same_base_range_episode_in_feed_and_afte
 
     pack_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _numbered_sequel_episode_and_pack_rss(
                 episode_title="[ExampleSub] Example Anime - 01 - 02 [1080p][CHS]",
                 pack_title="[ExampleSub] Example Anime 季度全集 [1080p]",
@@ -1453,13 +1048,11 @@ def test_run_once_base_range_suppresses_same_base_range_episode_in_feed_and_afte
                 progress=1.0,
             ),
         ),
-        dry_run=False,
-        organize=False,
+                organize=False,
     )
     after_completion_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 title="[ExampleSub] Example Anime - 01 - 02 [1080p][CHS]",
                 episode="01",
@@ -1507,8 +1100,7 @@ def test_run_once_completed_pack_with_embedded_episode_range_suppresses_later_ep
 
     pack_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _season_pack_rss(
                 info_hash="1212121212121212121212121212121212121212",
                 guid="season-pack-range-01-12",
@@ -1527,13 +1119,11 @@ def test_run_once_completed_pack_with_embedded_episode_range_suppresses_later_ep
                 progress=1.0,
             ),
         ),
-        dry_run=False,
-        organize=False,
+                organize=False,
     )
     episode_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 episode="01",
                 info_hash="1313131313131313131313131313131313131313",
@@ -1571,8 +1161,7 @@ def test_run_once_failed_pack_does_not_suppress_later_episode(tmp_path, monkeypa
 
     pack_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _season_pack_rss(
                 info_hash="2222222222222222222222222222222222222222",
                 guid="season-pack-200002",
@@ -1581,15 +1170,14 @@ def test_run_once_failed_pack_does_not_suppress_later_episode(tmp_path, monkeypa
         ),
     )
     first_monitor = monitor_once(
-        config_path, snapshots=(), dry_run=False, organize=False
+        config_path, snapshots=(), organize=False
     )
     second_monitor = monitor_once(
-        config_path, snapshots=(), dry_run=False, organize=False
+        config_path, snapshots=(), organize=False
     )
     later_episode = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 episode="02",
                 info_hash="3333333333333333333333333333333333333333",
@@ -1634,8 +1222,7 @@ def test_run_once_episode_only_rule_ignores_persisted_satisfied_pack(
 
     result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 episode="02",
                 info_hash="3333333333333333333333333333333333333333",
@@ -1731,8 +1318,7 @@ def test_run_once_satisfied_pack_suppresses_later_cjk_episode_marker(
 
     pack_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _season_pack_rss(
                 info_hash="2222222222222222222222222222222222222222",
                 guid="season-pack-200002",
@@ -1750,13 +1336,11 @@ def test_run_once_satisfied_pack_suppresses_later_cjk_episode_marker(
                 progress=1.0,
             ),
         ),
-        dry_run=False,
-        organize=False,
+                organize=False,
     )
     episode_result = run_once(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 episode=episode_marker,
                 info_hash="3333333333333333333333333333333333333333",
@@ -1826,93 +1410,6 @@ def test_run_once_allowed_numbered_sequel_pack_does_not_suppress_base_series_epi
     ]
 
 
-def test_run_once_dry_run_allowed_pack_does_not_satisfy_later_episode(
-    tmp_path, monkeypatch
-):
-    config_path = _config(tmp_path, organizer_mode="move")
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["subscriptions"]["rules"][0]["allow_packs"] = True
-    raw["subscriptions"]["rules"][0]["categories"] = ["動畫", "季度全集"]
-    config_path.write_text(json.dumps(raw), encoding="utf-8")
-    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
-    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
-    state_path = tmp_path / "state.sqlite3"
-    fake_qbit = FakeQbittorrentClient()
-
-    dry_result = run_once(
-        config_path,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: _episode_and_pack_rss(),
-            qbittorrent_factory=lambda _config: fake_qbit,
-        ),
-    )
-    assert not state_path.exists()
-
-    apply_result = run_once(
-        config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: _episode_rss(
-                episode="02",
-                info_hash="3333333333333333333333333333333333333333",
-                guid="episode-200003",
-            ),
-            qbittorrent_factory=lambda _config: fake_qbit,
-        ),
-    )
-
-    assert len(dry_result.candidates) == 1
-    assert dry_result.candidates[0].candidate.feed_item.is_season_pack is True
-    assert len(apply_result.candidates) == 1
-    assert apply_result.candidates[0].candidate.feed_item.is_season_pack is False
-    assert len(fake_qbit.submissions) == 2
-    with SubscriptionState(state_path) as state:
-        assert state.list_satisfied_season_packs() == ()
-        assert state.has_seen_item("infohash:3333333333333333333333333333333333333333")
-
-
-def test_run_once_dry_run_reads_satisfied_pack_suppression_without_mutating_state(
-    tmp_path,
-):
-    config_path = _config(tmp_path)
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["subscriptions"]["rules"][0]["allow_packs"] = True
-    config_path.write_text(json.dumps(raw), encoding="utf-8")
-    state_path = tmp_path / "state.sqlite3"
-    fake_qbit = FakeQbittorrentClient()
-    with SubscriptionState(state_path) as state:
-        assert state.record_satisfied_season_pack(
-            "example-show",
-            "example anime",
-            1,
-            job_id="dmhy-season-pack",
-            dedupe_key="infohash:2222222222222222222222222222222222222222",
-        )
-        before = state.list_satisfied_season_packs()
-
-    result = run_once(
-        config_path,
-        dry_run=True,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: _episode_rss(
-                episode="03",
-                info_hash="5555555555555555555555555555555555555555",
-                guid="episode-200005",
-            ),
-            qbittorrent_factory=lambda _config: fake_qbit,
-        ),
-    )
-
-    assert result.parsed_items == 1
-    assert result.candidates == ()
-    assert fake_qbit.submissions == []
-    with SubscriptionState(state_path) as state:
-        assert state.list_satisfied_season_packs() == before
-        assert not state.has_seen_item(
-            "infohash:5555555555555555555555555555555555555555"
-        )
-
-
 def test_run_once_episode_only_rule_keeps_episode_when_pack_is_present(tmp_path):
     config_path = _config(tmp_path)
     raw = json.loads(config_path.read_text(encoding="utf-8"))
@@ -1956,8 +1453,6 @@ def test_cli_commands_cover_validate_run_monitor_state_failures_and_retry(
                 str(config_path),
                 "--feed-file",
                 str(FIXTURE_RSS),
-                "--completed-source-path",
-                str(completed_source),
             ]
         )
         == 0
@@ -2002,13 +1497,10 @@ def test_cli_commands_cover_validate_run_monitor_state_failures_and_retry(
     )
     output = capsys.readouterr().out
     assert "valid config" in output
-    assert "run once: dry_run=True" in output
-    assert "planned qBittorrent submit:" in output
-    assert "planned organizer:" in output
-    assert "destination=" in output
-    assert "planned webhook:" in output
-    assert "event_type=download_planned" in output
-    assert "event_type=download_completed" in output
+    assert "run once:" in output
+    assert "qBittorrent submit:" in output
+    assert "webhook:" in output
+    assert "event_type=download_submitted" in output
     assert '"archived_rules"' in output
     assert "retryable" in output
     assert "Job reset to pending" in output
@@ -2105,67 +1597,7 @@ def test_snapshots_match_base32_jobs_to_hex_qbittorrent_hash_and_strip_mkv_title
     assert snapshots[0].name == "[Nekomoe kissaten&LoliHouse] LIAR GAME - 07 [1080p]"
 
 
-def test_cli_monitor_once_dry_run_previews_configured_state_without_mutating_it(
-    tmp_path, capsys
-):
-    config_path = _config(tmp_path)
-    source = tmp_path / "downloads" / "Example Anime - 01.mkv"
-    source.parent.mkdir()
-    source.write_bytes(b"video")
-    with SubscriptionState(tmp_path / "state.sqlite3") as state:
-        state.upsert_job(
-            "job-monitor-dry-run",
-            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
-            status=DownloadJobStatus.SUBMITTED,
-            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
-            metadata={"title": "Example Anime - 01"},
-        )
-    snapshot_json = tmp_path / "snapshots.json"
-    snapshot_json.write_text(
-        json.dumps(
-            [
-                {
-                    "torrent_hash": "abcdef1234567890abcdef1234567890abcdef12",
-                    "name": "Example Anime - 01",
-                    "state": "uploading",
-                    "progress": 1.0,
-                    "content_path": str(source),
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    assert (
-        cli.main(
-            [
-                "monitor-once",
-                "--config",
-                str(config_path),
-                "--snapshot-json",
-                str(snapshot_json),
-            ]
-        )
-        == 0
-    )
-
-    output = capsys.readouterr().out
-    assert (
-        "monitor once: dry_run=True updated_events=1 organizer_inputs=1 failures=0"
-        in output
-    )
-    assert "planned organizer: job_id=job-monitor-dry-run status=planned" in output
-    with SubscriptionState(tmp_path / "state.sqlite3") as state:
-        job = state.get_job("job-monitor-dry-run")
-    assert job is not None
-    assert job["status"] == DownloadJobStatus.SUBMITTED.value
-    assert job["organizer_outcome"] is None
-    assert "organizer_input_created_at" not in job["metadata"]
-
-
-def test_cli_monitor_once_apply_rejects_unsafe_organizer_config_without_mutation(
-    tmp_path, capsys
-):
+def test_cli_monitor_once_applies_completed_snapshot(tmp_path, capsys):
     config_path = _config(tmp_path)
     source = tmp_path / "downloads" / "Example Anime - 01.mkv"
     source.parent.mkdir()
@@ -2202,19 +1634,17 @@ def test_cli_monitor_once_apply_rejects_unsafe_organizer_config_without_mutation
                 str(config_path),
                 "--snapshot-json",
                 str(snapshot_json),
-                "--apply",
             ]
         )
-        == 2
+        == 0
     )
 
-    assert "apply mode requires" in capsys.readouterr().out
+    assert "organizer: job_id=job-monitor-apply status=applied" in capsys.readouterr().out
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         job = state.get_job("job-monitor-apply")
     assert job is not None
-    assert job["status"] == DownloadJobStatus.SUBMITTED.value
-    assert job["organizer_outcome"] is None
-    assert "organizer_input_created_at" not in job["metadata"]
+    assert job["status"] == DownloadJobStatus.COMPLETED.value
+    assert job["organizer_outcome"] == "applied"
     assert source.exists()
 
 
@@ -2259,7 +1689,6 @@ def test_cli_monitor_once_apply_prints_applied_organizer_label(
                 str(config_path),
                 "--snapshot-json",
                 str(snapshot_json),
-                "--apply",
             ]
         )
         == 0
@@ -2398,8 +1827,7 @@ def test_production_tick_apply_does_not_mark_new_submissions_missing_in_same_tic
 
     result = production_tick(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
             qbittorrent_factory=lambda _config: qbit,
             organizer_runner=lambda item, config: OrganizerResult(
@@ -2417,7 +1845,6 @@ def test_production_tick_apply_does_not_mark_new_submissions_missing_in_same_tic
         ),
     )
 
-    assert result.dry_run is False
     assert result.torrent_count == 1
     assert qbit.list_calls == [(None, True)]
     assert len(result.snapshots) == 0
@@ -2475,8 +1902,7 @@ def test_production_tick_apply_refreshes_completed_pack_state_before_rss_polling
 
     result = production_tick(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: _episode_rss(
                 episode="02",
                 info_hash=episode_hash,
@@ -2486,7 +1912,6 @@ def test_production_tick_apply_refreshes_completed_pack_state_before_rss_polling
         ),
     )
 
-    assert result.dry_run is False
     assert result.run_result.parsed_items == 1
     assert result.run_result.candidates == ()
     assert result.torrent_count == 1
@@ -2534,8 +1959,7 @@ def test_production_tick_monitors_preexisting_active_jobs(tmp_path, monkeypatch)
 
     result = production_tick(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: "<rss><channel></channel></rss>",
             qbittorrent_factory=lambda _config: qbit,
             organizer_runner=lambda item, config: OrganizerResult(
@@ -2593,8 +2017,7 @@ def test_production_tick_does_not_organize_qbittorrent_save_root_without_content
 
     result = production_tick(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: "<rss><channel></channel></rss>",
             qbittorrent_factory=lambda _config: qbit,
             organizer_runner=lambda item, config: (
@@ -2629,8 +2052,7 @@ def test_production_tick_returns_failure_summary_when_qbittorrent_listing_fails(
 
     result = production_tick(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: "<rss><channel></channel></rss>",
             qbittorrent_factory=lambda _config: qbit,
             organizer_runner=lambda item, config: (
@@ -2685,8 +2107,7 @@ def test_monitor_once_production_injects_bangumi_lookup_into_default_organizer(
                 completed_at=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             bangumi_lookup=lambda title: calls.append(title) or "示例动画"
         ),
     )
@@ -2740,8 +2161,7 @@ def test_monitor_once_prefers_bangumi_subject_id_title_for_default_organizer(
                 completed_at=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
             ),
         ),
-        dry_run=False,
-    )
+            )
 
     assert subject_ids == [571784]
     assert result.organizer_results[0].actions[0].destination_path is not None
@@ -2788,8 +2208,7 @@ def test_monitor_once_injected_bangumi_lookup_wins_over_subject_id_fetch(
                 completed_at=datetime(2026, 5, 24, 12, 0, tzinfo=timezone.utc),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             bangumi_lookup=lambda title: calls.append(title) or "调用方指定标题"
         ),
     )
@@ -2797,61 +2216,6 @@ def test_monitor_once_injected_bangumi_lookup_wins_over_subject_id_fetch(
     assert calls == ["超市后门吸烟的两人"]
     assert result.organizer_results[0].actions[0].destination_path is not None
     assert result.organizer_results[0].actions[0].destination_path.parts[-2] == "调用方指定标题"
-
-
-def test_plan_completed_dry_run_without_dependency_suppresses_default_bangumi_lookup(
-    tmp_path, monkeypatch
-):
-    config_path = _config(tmp_path)
-    source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
-    source.parent.mkdir()
-    source.write_bytes(b"video")
-    fake_qbit = FakeQbittorrentClient()
-    run_result = run_once(
-        config_path,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
-            qbittorrent_factory=lambda _config: fake_qbit,
-        ),
-    )
-    monkeypatch.setattr(
-        workflow,
-        "lookup_chinese_title",
-        lambda title: pytest.fail(f"unexpected Bangumi lookup for {title}"),
-    )
-
-    result = plan_completed_dry_run(config_path, run_result, str(source))
-
-    assert len(result.organizer_results) == 1
-    assert (
-        result.organizer_results[0].actions[0].destination_path
-        == tmp_path
-        / "library"
-        / "Example Anime"
-        / "Season 01"
-        / "Example Anime - S01E01 - ExampleSub [1080p].mkv"
-    )
-
-
-def test_organize_once_dry_run_forces_planning_even_when_config_mode_moves(tmp_path):
-    config_path = _config(tmp_path, organizer_mode="move")
-    source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 02 [1080p].mkv"
-    source.parent.mkdir()
-    source.write_bytes(b"video")
-
-    result = organize_once(
-        config_path,
-        OrganizerInput(
-            "job-organize",
-            "HASH",
-            "[ExampleSub] Example Anime - 02 [1080p]",
-            str(source),
-            datetime.now(timezone.utc),
-        ),
-    )
-
-    assert result.result.actions[0].status == "planned"
-    assert source.exists()
 
 
 def test_organize_once_passes_dependency_episode_parser_to_default_organizer(tmp_path):
@@ -2880,7 +2244,7 @@ def test_organize_once_passes_dependency_episode_parser_to_default_organizer(tmp
     )
 
     assert calls == ["[ExampleSub] Example OVA [1080p]"]
-    assert result.result.actions[0].status == "planned"
+    assert result.result.actions[0].status == "applied"
     assert result.result.actions[0].destination_path == (
         tmp_path
         / "library"
@@ -2926,7 +2290,6 @@ def test_organize_once_uses_configured_callback_episode_parser(tmp_path, monkeyp
                 datetime.now(timezone.utc),
                 {
                     "rule_name": "example-rule",
-                    "bangumi_subject_id": 12345,
                     "release_group": "ExampleSub",
                     "quality": "1080p",
                     "category": "動畫",
@@ -2947,7 +2310,7 @@ def test_organize_once_uses_configured_callback_episode_parser(tmp_path, monkeyp
         thread.join(timeout=2)
         server.server_close()
 
-    assert result.result.actions[0].status == "planned"
+    assert result.result.actions[0].status == "applied"
     assert result.result.actions[0].destination_path == (
         tmp_path
         / "library"
@@ -2962,7 +2325,6 @@ def test_organize_once_uses_configured_callback_episode_parser(tmp_path, monkeyp
     assert bodies[0]["source_name"] == source.name
     assert bodies[0]["safe_context"] == {
         "rule_name": "example-rule",
-        "bangumi_subject_id": 12345,
         "release_group": "ExampleSub",
         "quality": "1080p",
         "category": "動畫",
@@ -3059,17 +2421,18 @@ def test_dependency_episode_parser_overrides_configured_callback_parser(tmp_path
     )
 
 
-def test_apply_mode_refuses_unsafe_config_until_credentials_and_move_are_explicit(
+def test_apply_mode_refuses_unsafe_config_until_credentials_are_explicit(
     tmp_path, monkeypatch
 ):
-    dry_config = load_config(_config(tmp_path))
-    with pytest.raises(Exception, match="credential|organizer"):
-        ensure_apply_safe(dry_config, dry_run=False)
-
+    monkeypatch.delenv("QBITTORRENT_USERNAME", raising=False)
+    monkeypatch.delenv("QBITTORRENT_PASSWORD", raising=False)
     apply_config = load_config(_config(tmp_path, organizer_mode="move"))
+    with pytest.raises(Exception, match="credential"):
+        ensure_apply_safe(apply_config)
+
     monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
     monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
-    ensure_apply_safe(apply_config, dry_run=False)
+    ensure_apply_safe(apply_config)
 
 
 def test_state_lists_processed_pending_failed_and_retryable_records(tmp_path):
@@ -3268,117 +2631,8 @@ def test_scheduler_tick_skips_archived_rules(tmp_path):
         ),
     )
 
-    assert result.candidates == ()
+    assert result.run_result.candidates == ()
     assert fake_qbit.submissions == []
-
-
-def test_run_once_dry_run_reads_archived_rules_from_uri_safe_state_path(tmp_path):
-    config_path = _config(tmp_path)
-    state_path = tmp_path / "state#archive?.sqlite3"
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["state"]["path"] = str(state_path)
-    config_path.write_text(json.dumps(raw), encoding="utf-8")
-    fake_qbit = FakeQbittorrentClient()
-    with SubscriptionState(state_path) as state:
-        state.archive_rule(
-            "example-show", bangumi_subject_id=12345, reason="bangumi_complete"
-        )
-
-    result = run_once(
-        config_path,
-        dry_run=True,
-        dependencies=WorkflowDependencies(
-            feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
-            qbittorrent_factory=lambda _config: fake_qbit,
-        ),
-    )
-
-    assert result.candidates == ()
-    assert fake_qbit.submissions == []
-
-
-def test_monitor_once_dry_run_reads_jobs_from_uri_safe_state_path_without_sibling_db(
-    tmp_path,
-):
-    config_path = _config(tmp_path)
-    state_path = tmp_path / "state?round1#monitor.sqlite3"
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["state"]["path"] = str(state_path)
-    config_path.write_text(json.dumps(raw), encoding="utf-8")
-    source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
-    source.parent.mkdir()
-    source.write_bytes(b"video")
-    with SubscriptionState(state_path) as state:
-        state.upsert_job(
-            "job-uri-safe",
-            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
-            status=DownloadJobStatus.SUBMITTED,
-            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
-            metadata={"title": "[ExampleSub] Example Anime - 01 [1080p][CHS]"},
-        )
-
-    result = monitor_once(
-        config_path,
-        snapshots=(
-            TorrentSnapshot(
-                torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
-                name="[ExampleSub] Example Anime - 01 [1080p][CHS]",
-                state="uploading",
-                progress=1.0,
-                content_path=str(source),
-            ),
-        ),
-        dry_run=True,
-    )
-
-    assert [item.job_id for item in result.organizer_inputs] == ["job-uri-safe"]
-    assert result.organizer_results[0].actions[0].status == "planned"
-    assert source.exists()
-    assert not (tmp_path / "state").exists()
-
-
-@pytest.mark.parametrize("organizer_mode", ["move", "apply"])
-def test_monitor_once_dry_run_forces_organizer_planning_and_leaves_state_unchanged(
-    tmp_path, organizer_mode
-):
-    config_path = _config(tmp_path, organizer_mode=organizer_mode)
-    source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
-    source.parent.mkdir()
-    source.write_bytes(b"video")
-    with SubscriptionState(tmp_path / "state.sqlite3") as state:
-        state.upsert_job(
-            "job-dry-run-monitor",
-            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
-            status=DownloadJobStatus.SUBMITTED,
-            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
-            metadata={"title": "[ExampleSub] Example Anime - 01 [1080p][CHS]"},
-        )
-
-    result = monitor_once(
-        config_path,
-        snapshots=(
-            TorrentSnapshot(
-                torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
-                name="[ExampleSub] Example Anime - 01 [1080p][CHS]",
-                state="uploading",
-                progress=1.0,
-                content_path=str(source),
-            ),
-        ),
-        dry_run=True,
-    )
-
-    action = result.organizer_results[0].actions[0]
-    assert action.status == "planned"
-    assert source.read_bytes() == b"video"
-    assert action.destination_path is not None
-    assert not action.destination_path.exists()
-    with SubscriptionState(tmp_path / "state.sqlite3") as state:
-        job = state.get_job("job-dry-run-monitor")
-        assert job is not None
-        assert job["status"] == DownloadJobStatus.SUBMITTED.value
-        assert job["organizer_outcome"] is None
-        assert state.list_organizer_outcomes() == ()
 
 
 def test_monitor_once_records_no_destination_unsorted_as_organizer_intervention(
@@ -3411,8 +2665,7 @@ def test_monitor_once_records_no_destination_unsorted_as_organizer_intervention(
                 content_path=str(source),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             organizer_runner=lambda item, config: OrganizerResult(
                 item.job_id,
                 config.organizer.mode,
@@ -3475,8 +2728,7 @@ def test_monitor_once_applied_organizer_updates_content_path_and_preserves_origi
                 content_path=str(source),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             organizer_runner=lambda item, config: OrganizerResult(
                 item.job_id,
                 config.organizer.mode,
@@ -3514,8 +2766,7 @@ def test_monitor_once_applied_organizer_updates_content_path_and_preserves_origi
                 content_path=str(source),
             ),
         ),
-        dry_run=False,
-    )
+            )
 
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         job = state.get_job("job-applied-content-path")
@@ -3573,8 +2824,7 @@ def test_monitor_once_applied_sidecar_action_preserves_primary_content_path(
                 content_path=str(source),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             organizer_runner=lambda item, config: OrganizerResult(
                 item.job_id,
                 config.organizer.mode,
@@ -3661,8 +2911,7 @@ def test_monitor_once_mixed_sidecar_conflict_preserves_applied_video_content_pat
     monitor_once(
         config_path,
         snapshots=(snapshot,),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             organizer_runner=lambda item, config: OrganizerResult(
                 item.job_id,
                 config.organizer.mode,
@@ -3699,8 +2948,7 @@ def test_monitor_once_mixed_sidecar_conflict_preserves_applied_video_content_pat
     monitor_once(
         config_path,
         snapshots=(snapshot,),
-        dry_run=False,
-    )
+            )
 
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         job = state.get_job("job-mixed-sidecar-conflict-content-path")
@@ -3738,8 +2986,7 @@ def test_monitor_once_apply_without_organize_does_not_persist_planning_state_and
     first = monitor_once(
         config_path,
         snapshots=(snapshot,),
-        dry_run=False,
-        organize=False,
+                organize=False,
     )
 
     assert first.organizer_inputs == ()
@@ -3773,8 +3020,7 @@ def test_monitor_once_apply_without_organize_does_not_persist_planning_state_and
 
     second = production_tick(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: "<rss><channel></channel></rss>",
             qbittorrent_factory=lambda _config: qbit,
         ),
@@ -3802,87 +3048,6 @@ def test_monitor_once_apply_without_organize_does_not_persist_planning_state_and
         assert "organizer_input_created_at" in job["metadata"]
 
 
-def test_cli_monitor_once_dry_run_plans_without_mutation_and_apply_still_copies(
-    tmp_path, monkeypatch, capsys
-):
-    config_path = _config(tmp_path, organizer_mode="move")
-    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
-    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
-    source = tmp_path / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
-    source.parent.mkdir()
-    source.write_bytes(b"video")
-    snapshot_path = tmp_path / "snapshot.json"
-    snapshot = {
-        "torrent_hash": "abcdef1234567890abcdef1234567890abcdef12",
-        "name": "[ExampleSub] Example Anime - 01 [1080p][CHS]",
-        "state": "uploading",
-        "progress": 1.0,
-        "content_path": str(source),
-    }
-    snapshot_path.write_text(json.dumps([snapshot]), encoding="utf-8")
-    with SubscriptionState(tmp_path / "state.sqlite3") as state:
-        state.upsert_job(
-            "job-cli-monitor",
-            dedupe_key="infohash:abcdef1234567890abcdef1234567890abcdef12",
-            status=DownloadJobStatus.SUBMITTED,
-            torrent_hash="abcdef1234567890abcdef1234567890abcdef12",
-            metadata={"title": "[ExampleSub] Example Anime - 01 [1080p][CHS]"},
-        )
-
-    assert (
-        cli.main(
-            [
-                "monitor-once",
-                "--config",
-                str(config_path),
-                "--snapshot-json",
-                str(snapshot_path),
-                "--dry-run",
-            ]
-        )
-        == 0
-    )
-    capsys.readouterr()
-
-    destination = (
-        tmp_path
-        / "library"
-        / "Example Anime"
-        / "Season 01"
-        / "Example Anime - S01E01 - ExampleSub [1080p].mkv"
-    )
-    assert source.read_bytes() == b"video"
-    assert not destination.exists()
-    with SubscriptionState(tmp_path / "state.sqlite3") as state:
-        job = state.get_job("job-cli-monitor")
-        assert job is not None
-        assert job["status"] == DownloadJobStatus.SUBMITTED.value
-        assert job["organizer_outcome"] is None
-
-    assert (
-        cli.main(
-            [
-                "monitor-once",
-                "--config",
-                str(config_path),
-                "--snapshot-json",
-                str(snapshot_path),
-                "--apply",
-            ]
-        )
-        == 0
-    )
-    capsys.readouterr()
-
-    assert source.exists()
-    assert destination.read_bytes() == b"video"
-    with SubscriptionState(tmp_path / "state.sqlite3") as state:
-        job = state.get_job("job-cli-monitor")
-        assert job is not None
-        assert job["status"] == DownloadJobStatus.COMPLETED.value
-        assert job["organizer_outcome"] == "applied"
-
-
 def test_monitor_once_archives_rule_after_bangumi_main_episodes_are_completed_and_organized(
     tmp_path,
 ):
@@ -3903,8 +3068,7 @@ def test_monitor_once_archives_rule_after_bangumi_main_episodes_are_completed_an
     result = monitor_once(
         config_path,
         snapshots=(),
-        dry_run=False,
-        organize=False,
+                organize=False,
         dependencies=WorkflowDependencies(
             bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(
                 subject_id, 2, (1, 2)
@@ -3968,8 +3132,7 @@ def test_monitor_once_archives_rule_after_one_job_organizes_multiple_bangumi_epi
                 content_path=str(source),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(
                 subject_id, 12, episodes
             ),
@@ -4045,8 +3208,7 @@ def test_monitor_once_does_not_archive_rule_when_pack_has_non_applied_episode_ac
                 content_path=str(source),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(
                 subject_id, 2, (1, 2)
             ),
@@ -4083,8 +3245,7 @@ def test_monitor_once_does_not_archive_completed_rule_without_applied_organizer_
     result = monitor_once(
         config_path,
         snapshots=(),
-        dry_run=False,
-        organize=False,
+                organize=False,
         dependencies=WorkflowDependencies(
             bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(
                 subject_id, 2, (1, 2)
@@ -4116,8 +3277,7 @@ def test_monitor_once_does_not_archive_when_bangumi_episode_list_is_incomplete(
     result = monitor_once(
         config_path,
         snapshots=(),
-        dry_run=False,
-        organize=False,
+                organize=False,
         dependencies=WorkflowDependencies(
             bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(
                 subject_id, 2, (1,)
@@ -4128,28 +3288,6 @@ def test_monitor_once_does_not_archive_when_bangumi_episode_list_is_incomplete(
     assert all(event.event_type != "subscription_archived" for event in result.events)
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         assert state.is_rule_archived("example-show") is False
-
-
-def test_monitor_once_dry_run_does_not_persist_subscription_archival(tmp_path):
-    config_path = _config(tmp_path)
-    raw = json.loads(config_path.read_text(encoding="utf-8"))
-    raw["subscriptions"]["rules"][0]["bangumi_subject_id"] = 12345
-    config_path.write_text(json.dumps(raw), encoding="utf-8")
-
-    result = monitor_once(
-        config_path,
-        snapshots=(),
-        dry_run=True,
-        organize=False,
-        dependencies=WorkflowDependencies(
-            bangumi_subject_fetcher=lambda subject_id: workflow.BangumiSubjectEpisodes(
-                subject_id, 1, (1,)
-            )
-        ),
-    )
-
-    assert result.events == ()
-    assert not (tmp_path / "state.sqlite3").exists()
 
 
 def test_monitor_once_sends_telegram_for_applied_video_episode_with_bangumi_cover(tmp_path, monkeypatch):
@@ -4194,8 +3332,7 @@ def test_monitor_once_sends_telegram_for_applied_video_episode_with_bangumi_cove
                 content_path=str(source),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             organizer_runner=organize_episode,
             telegram_factory=lambda _config: notifier,
             bangumi_cover_fetcher=lambda subject_id: cover_subject_ids.append(subject_id) or "https://img.example.invalid/cover.jpg",
@@ -4285,8 +3422,7 @@ def test_monitor_once_retries_retryable_telegram_failure_from_durable_queue(tmp_
                 content_path=str(tmp_path / "downloads" / "Example Anime - 01.mkv"),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             organizer_runner=organize_episode,
             telegram_factory=lambda _config: first_notifier,
             bangumi_cover_fetcher=lambda _subject_id: None,
@@ -4306,8 +3442,7 @@ def test_monitor_once_retries_retryable_telegram_failure_from_durable_queue(tmp_
     second = monitor_once(
         config_path,
         snapshots=(),
-        dry_run=False,
-        organize=False,
+                organize=False,
         dependencies=WorkflowDependencies(telegram_factory=lambda _config: second_notifier),
     )
 
@@ -4354,7 +3489,7 @@ def test_monitor_once_blocks_unsafe_telegram_queue_dispatch_without_terminal_fai
         )
 
     with pytest.raises(ConfigError, match="Telegram bot token"):
-        monitor_once(config_path, snapshots=(), dry_run=False, organize=False)
+        monitor_once(config_path, snapshots=(), organize=False)
 
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         job = state.get_job("job-telegram-unsafe-token")
@@ -4370,8 +3505,7 @@ def test_monitor_once_blocks_unsafe_telegram_queue_dispatch_without_terminal_fai
     result = monitor_once(
         config_path,
         snapshots=(),
-        dry_run=False,
-        organize=False,
+                organize=False,
         dependencies=WorkflowDependencies(telegram_factory=lambda _config: notifier),
     )
 
@@ -4442,8 +3576,7 @@ def test_monitor_once_keeps_telegram_failure_until_all_job_notifications_are_sen
     first = monitor_once(
         config_path,
         snapshots=(),
-        dry_run=False,
-        organize=False,
+                organize=False,
         dependencies=WorkflowDependencies(telegram_factory=lambda _config: first_notifier),
     )
 
@@ -4462,8 +3595,7 @@ def test_monitor_once_keeps_telegram_failure_until_all_job_notifications_are_sen
     second = monitor_once(
         config_path,
         snapshots=(),
-        dry_run=False,
-        organize=False,
+                organize=False,
         dependencies=WorkflowDependencies(telegram_factory=lambda _config: second_notifier),
     )
 
@@ -4535,8 +3667,7 @@ def test_monitor_once_keeps_non_retryable_telegram_failure_after_later_notificat
     result = monitor_once(
         config_path,
         snapshots=(),
-        dry_run=False,
-        organize=False,
+                organize=False,
         dependencies=WorkflowDependencies(telegram_factory=lambda _config: notifier),
     )
 
@@ -4596,8 +3727,7 @@ def test_organize_once_apply_does_not_queue_telegram_for_later_monitor_delivery(
     organize_once(
         config_path,
         organizer_input,
-        dry_run=False,
-        dependencies=WorkflowDependencies(organizer_runner=organize_episode),
+                dependencies=WorkflowDependencies(organizer_runner=organize_episode),
     )
 
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
@@ -4608,8 +3738,7 @@ def test_organize_once_apply_does_not_queue_telegram_for_later_monitor_delivery(
     result = monitor_once(
         config_path,
         snapshots=(),
-        dry_run=False,
-        organize=False,
+                organize=False,
         dependencies=WorkflowDependencies(telegram_factory=lambda _config: notifier),
     )
 
@@ -4618,17 +3747,16 @@ def test_organize_once_apply_does_not_queue_telegram_for_later_monitor_delivery(
 
 
 @pytest.mark.parametrize(
-    ("dry_run", "status", "media_type", "episode", "metadata"),
+    ("status", "media_type", "episode", "metadata"),
     [
-        (True, "applied", "video", 1, {"bangumi_subject_id": 12345}),
-        (False, "planned", "video", 1, {"bangumi_subject_id": 12345}),
-        (False, "applied", "subtitle", 1, {"bangumi_subject_id": 12345}),
-        (False, "applied", "video", None, {"bangumi_subject_id": 12345}),
-        (False, "applied", "video", 1, {}),
+        ("planned", "video", 1, {"bangumi_subject_id": 12345}),
+        ("applied", "subtitle", 1, {"bangumi_subject_id": 12345}),
+        ("applied", "video", None, {"bangumi_subject_id": 12345}),
+        ("applied", "video", 1, {}),
     ],
 )
 def test_monitor_once_does_not_send_telegram_without_required_applied_video_episode_conditions(
-    tmp_path, monkeypatch, dry_run, status, media_type, episode, metadata
+    tmp_path, monkeypatch, status, media_type, episode, metadata
 ):
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123456:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi")
     config_path = _telegram_config(tmp_path)
@@ -4670,7 +3798,6 @@ def test_monitor_once_does_not_send_telegram_without_required_applied_video_epis
                 content_path=str(tmp_path / "downloads" / "Example Anime - 01.mkv"),
             ),
         ),
-        dry_run=dry_run,
         dependencies=WorkflowDependencies(
             organizer_runner=organize_episode,
             telegram_factory=lambda _config: notifier,
@@ -4726,8 +3853,7 @@ def test_monitor_once_sends_telegram_without_cover_when_bangumi_cover_fetcher_fa
                 content_path=str(tmp_path / "downloads" / "Example Anime - 01.mkv"),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             organizer_runner=organize_episode,
             telegram_factory=lambda _config: notifier,
             bangumi_cover_fetcher=fail_cover_fetch,
@@ -4779,8 +3905,7 @@ def test_monitor_once_skips_telegram_and_cover_fetch_when_telegram_disabled(tmp_
                 content_path=str(tmp_path / "downloads" / "Example Anime - 01.mkv"),
             ),
         ),
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             organizer_runner=organize_episode,
             bangumi_cover_fetcher=lambda subject_id: cover_subject_ids.append(subject_id) or None,
         ),
@@ -4801,7 +3926,6 @@ def test_register_tolerates_partial_hermes_contexts_and_exposes_tools():
     register(ctx)
 
     assert "dmhy.validate_config" in ctx.tools
-    assert "dmhy.run_once_dry_run" in ctx.tools
     assert "dmhy.schedule_tick" in ctx.hooks
     assert "hermes-dmhy" in ctx.commands
 
@@ -5019,8 +4143,7 @@ def test_registered_plugin_monitor_once_accepts_json_snapshot_dicts(tmp_path):
                 "completed_at": "2026-01-02T00:00:00+00:00",
             }
         ],
-        dry_run=True,
-    )
+            )
 
     assert result["organizer_inputs"][0]["job_id"] == "job-plugin-monitor-json"
     assert result["organizer_inputs"][0]["completed_at"] == "2026-01-02T00:00:00+00:00"
@@ -5045,8 +4168,7 @@ def test_registered_plugin_organize_once_accepts_json_organizer_input_dict(tmp_p
             "completed_at": "2026-01-02T00:00:00+00:00",
             "metadata": {"qbittorrent_state": "uploading"},
         },
-        dry_run=True,
-    )
+            )
 
     assert result["result"]["job_id"] == "job-plugin-organize-json"
     json.dumps(result)
@@ -5091,7 +4213,7 @@ def test_registered_plugin_tool_results_are_json_serializable(tmp_path, monkeypa
     calls = (
         ("dmhy.validate_config", (str(dry_config_path),), {}),
         (
-            "dmhy.run_once_dry_run",
+            "dmhy.run_once_apply",
             (str(dry_config_path),),
             {"dependencies": dependencies},
         ),
@@ -5103,12 +4225,12 @@ def test_registered_plugin_tool_results_are_json_serializable(tmp_path, monkeypa
         (
             "dmhy.monitor_once",
             (str(dry_config_path),),
-            {"snapshots": (), "dry_run": True, "organize": False},
+            {"snapshots": (), "organize": False},
         ),
         (
             "dmhy.organize_once",
             (str(dry_config_path), organizer_input),
-            {"dry_run": True},
+            {},
         ),
         ("dmhy.list_state", (str(dry_config_path),), {}),
         ("dmhy.list_failures", (str(dry_config_path),), {}),
@@ -5148,8 +4270,7 @@ def test_production_tick_lists_all_qbittorrent_torrents_to_avoid_stale_category_
 
     production_tick(
         config_path,
-        dry_run=False,
-        dependencies=WorkflowDependencies(
+                dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
             qbittorrent_factory=lambda _config: qbit,
             organizer_runner=lambda item, config: OrganizerResult(
@@ -5170,8 +4291,7 @@ def test_production_tick_summary_includes_telegram_failure_details():
         {},
     )
     result = workflow.ProductionTickResult(
-        dry_run=False,
-        run_result=workflow.RunOnceResult(False, 0, 0, (), ()),
+        run_result=workflow.RunOnceResult(0, 0, (), ()),
         monitor_result=workflow.MonitorOnceResult(
             (),
             (),
@@ -5223,12 +4343,12 @@ def test_cli_schedule_tick_apply_prints_json_summary(tmp_path, monkeypatch, caps
         ok = True
 
         def summary(self):
-            return {"ok": True, "dry_run": False, "monitor": {"organizer_inputs": 0}}
+            return {"ok": True, "monitor": {"organizer_inputs": 0}}
 
     calls = []
 
-    def fake_production_tick(config, *, dry_run, dependencies=None):
-        calls.append((config, dry_run, dependencies is not None))
+    def fake_production_tick(config, *, dependencies=None):
+        calls.append((config, dependencies is not None))
         return FakeTickResult()
 
     monkeypatch.setattr(cli, "production_tick", fake_production_tick)
@@ -5241,15 +4361,14 @@ def test_cli_schedule_tick_apply_prints_json_summary(tmp_path, monkeypatch, caps
                 str(config_path),
                 "--feed-file",
                 str(FIXTURE_RSS),
-                "--apply",
             ]
         )
         == 0
     )
 
-    assert calls == [(str(config_path), False, True)]
+    assert calls == [(str(config_path), True)]
     output = json.loads(capsys.readouterr().out)
-    assert output == {"ok": True, "dry_run": False, "monitor": {"organizer_inputs": 0}}
+    assert output == {"ok": True, "monitor": {"organizer_inputs": 0}}
 
 
 def test_cli_schedule_tick_apply_exits_nonzero_when_summary_not_ok(
@@ -5267,7 +4386,7 @@ def test_cli_schedule_tick_apply_exits_nonzero_when_summary_not_ok(
         cli, "production_tick", lambda *args, **kwargs: FakeTickResult()
     )
 
-    assert cli.main(["schedule-tick", "--config", str(config_path), "--apply"]) == 1
+    assert cli.main(["schedule-tick", "--config", str(config_path)]) == 1
     assert json.loads(capsys.readouterr().out)["ok"] is False
 
 
@@ -5278,12 +4397,11 @@ def test_scheduler_tick_is_bounded_one_shot(tmp_path):
         config_path,
         dependencies=WorkflowDependencies(
             feed_fetcher=lambda _url: FIXTURE_RSS.read_text(encoding="utf-8"),
-            qbittorrent_factory=lambda _config: FakeQbittorrentClient(),
+            qbittorrent_factory=lambda _config: FakeProductionQbittorrentClient(()),
         ),
     )
 
-    assert result.dry_run is True
-    assert result.parsed_items == 1
+    assert result.run_result.parsed_items == 1
 
 
 class RecordingContext:
@@ -5316,7 +4434,7 @@ class RecordingTelegramNotifier:
         )
 
 
-def _config(tmp_path, organizer_mode="dry-run"):
+def _config(tmp_path, organizer_mode="apply"):
     raw = json.loads(VALID_CONFIG.read_text(encoding="utf-8"))
     raw["state"]["path"] = str(tmp_path / "state.sqlite3")
     raw["organizer"]["library_root"] = str(tmp_path / "library")

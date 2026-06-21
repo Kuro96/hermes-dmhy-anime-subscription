@@ -57,7 +57,7 @@
     "path": "var/state/dmhy-subscription.sqlite3"
   },
   "organizer": {
-    "mode": "dry-run",
+    "mode": "apply",
     "library_root": "var/library-sandbox",
     "staging_root": "var/staging"
   },

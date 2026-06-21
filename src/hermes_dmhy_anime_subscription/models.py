@@ -27,7 +27,6 @@ class DownloadJobStatus(StrEnum):
 class OrganizerMode(StrEnum):
     """Organizer execution mode from configuration."""
 
-    DRY_RUN = "dry-run"
     APPLY = "apply"
     MOVE = "move"
 

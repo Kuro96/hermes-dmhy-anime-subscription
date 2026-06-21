@@ -28,7 +28,7 @@ def test_core_models_construct_without_runtime_dependencies():
     candidate = ReleaseCandidate(feed_item=item, rule_name="example-rule", title="Example", quality="1080p")
     job = DownloadJob(job_id="job-1", candidate=candidate, status=DownloadJobStatus.PENDING)
     rule = SubscriptionRule(name="example-rule", include_keywords=("Example",), category="anime")
-    move_plan = LibraryMovePlan(source_path="/tmp/a", destination_path="/tmp/b", mode=OrganizerMode.DRY_RUN)
+    move_plan = LibraryMovePlan(source_path="/tmp/a", destination_path="/tmp/b", mode=OrganizerMode.APPLY)
     event = NotificationEvent(event_type="job", title="Created", message="Job created", job_id=job.job_id)
     failure = FailureRecord(subject_id=job.job_id, stage="download", message="failed", attempts=1)
     state_entry = StateEntry(key=item.dedupe_key, kind="seen_item", payload={"title": item.title})

@@ -647,8 +647,7 @@ def _plan_action(source: Path, destination: Path, library_root: Path, mode: Orga
         return OrganizerAction(source, destination, "conflict", media_type, "Destination already exists", info.episode, info.season)
     if info.episode is None:
         return OrganizerAction(source, destination, "unsorted", media_type, "Episode could not be parsed", None, info.season)
-    status = "planned" if mode is OrganizerMode.DRY_RUN else "planned"
-    return OrganizerAction(source, destination, status, media_type, None, info.episode, info.season)
+    return OrganizerAction(source, destination, "planned", media_type, None, info.episode, info.season)
 
 
 def _apply_action(action: OrganizerAction) -> OrganizerAction:

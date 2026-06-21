@@ -377,7 +377,7 @@ def test_direct_migration_and_readonly_copy_choose_newest_duplicate_identity_row
 def test_failure_and_organizer_outcome_slots_are_available(tmp_path):
     with SubscriptionState(tmp_path / "state.sqlite3") as state:
         state.record_failure("job-1", "download", "temporary failure", attempts=2)
-        state.record_organizer_outcome("job-1", "dry-run", "/tmp/source", "/tmp/dest")
+        state.record_organizer_outcome("job-1", "applied", "/tmp/source", "/tmp/dest")
 
 
 def test_clear_failure_removes_only_matching_subject_and_stage(tmp_path):

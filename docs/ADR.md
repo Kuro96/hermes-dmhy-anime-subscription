@@ -40,4 +40,4 @@ DMHY RSS 的 pack 判断仍属于 `dmhy.py` / rules / workflow 层，organizer �
 
 不实现复杂合集拆分、季度包自动展开、disc/volume/part/cour 的智能语义识别。
 
-不改变 organizer 的安全边界：发现视频和字幕、过滤 extras/sample、目标路径净化、冲突处理、dry-run/apply copy、Bangumi lookup 注入和事件行为都应保持。
+不改变 organizer 的安全边界：发现视频和字幕、过滤 extras/sample、目标路径净化、冲突处理、apply copy、Bangumi lookup 注入和事件行为都应保持。

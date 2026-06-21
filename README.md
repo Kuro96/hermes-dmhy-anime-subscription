@@ -1,8 +1,6 @@
 # Hermes DMHY Anime Subscription
 
-Hermes directory plugin for DMHY public RSS subscriptions. It reads fixture or public RSS feeds, matches releases against subscription rules, plans or submits qBittorrent jobs, tracks state in SQLite, plans safe media organization, and can emit webhook events.
-
-The safe path is dry-run first. Dry-run qBittorrent, organizer, and webhook work is planner-only and does not call live services, copy files, or write configured SQLite state.
+Hermes directory plugin for DMHY public RSS subscriptions. It reads fixture or public RSS feeds, matches releases against subscription rules, submits qBittorrent jobs, tracks state in SQLite, organizes completed media, and can emit webhook events.
 
 ## Scope Boundaries
 
@@ -10,47 +8,25 @@ This plugin supports public DMHY RSS feeds only. It does not log in to private t
 
 The runtime package uses the Python standard library only. Tests use `pytest`.
 
-## Quickstart, Dry-Run First
+## Quickstart
 
-Run these commands from this repository. They create a temporary sandbox config from the checked-in fixture, then run a full dry-run with fixture RSS and a fake completed media file.
+Run these commands from this repository for offline validation. They do not contact qBittorrent, webhooks, Telegram, or callback episode parsers.
 
 ```bash
-export HERMES_DMHY_SANDBOX="$(mktemp -d)"
-mkdir -p "$HERMES_DMHY_SANDBOX/downloads" "$HERMES_DMHY_SANDBOX/library" "$HERMES_DMHY_SANDBOX/staging" "$HERMES_DMHY_SANDBOX/state"
-cp fixtures/config/valid.example.json "$HERMES_DMHY_SANDBOX/config.json"
-PYTHONDONTWRITEBYTECODE=1 python - <<'PY'
-import json
-import os
-from pathlib import Path
-
-root = Path(os.environ["HERMES_DMHY_SANDBOX"])
-config_path = root / "config.json"
-config = json.loads(config_path.read_text(encoding="utf-8"))
-config["state"]["path"] = str(root / "state" / "dmhy-subscription.sqlite3")
-config["qbittorrent"]["save_path"] = str(root / "downloads")
-config["organizer"]["library_root"] = str(root / "library")
-config["organizer"]["staging_root"] = str(root / "staging")
-config["subscriptions"]["rules"][0]["include_keywords"] = ["Example Anime", "1080p"]
-config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-(root / "downloads" / "[ExampleSub] Example Anime - 01 [1080p][CHS].mkv").write_bytes(b"fixture video")
-print(config_path)
-PY
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli validate-config --config "$HERMES_DMHY_SANDBOX/config.json"
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli run-once --config "$HERMES_DMHY_SANDBOX/config.json" --dry-run --feed-file fixtures/dmhy/rss-anime.xml --completed-source-path "$HERMES_DMHY_SANDBOX/downloads/[ExampleSub] Example Anime - 01 [1080p][CHS].mkv"
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli validate-config --config fixtures/config/valid.example.json
+PYTHONDONTWRITEBYTECODE=1 python scripts/release_readiness.py --skip-pytest
 ```
 
 Expected output includes these lines:
 
 ```text
-valid config: .../config.json
-run once: dry_run=True parsed=1 candidates=1 planned=1
-planned qBittorrent submit: ... status=planned ...
-planned webhook: ... event_type=download_planned
-planned organizer: ... status=planned ... destination=...
-planned webhook: ... event_type=download_completed
+valid config: .../valid.example.json
+release readiness: static AST check passed
+release readiness: invalid config rejected as expected: invalid-unsafe-polling.json
+release readiness: passed
 ```
 
-When you are ready to use live services, set qBittorrent credential environment variables, keep webhook URLs in environment variables, change `organizer.mode` only after testing paths, then run apply commands such as `run-once --apply` or `monitor-once --apply`. Apply mode with organization enabled is blocked unless qBittorrent credential env names and values are present and organizer mode is `apply` or `move`.
+`run-once`, `monitor-once`, `organize-once`, and `schedule-tick` are apply-only commands. Use disposable qBittorrent credentials, category, save path, library path, webhook URL env values, and Telegram env values while testing live behavior. Apply mode is guarded by `ensure_apply_safe`: qBittorrent credential env var names and values must exist, webhook URL env values must exist when enabled, Telegram bot token env values must exist when enabled, and `organizer.mode` must be `apply` or `move`.
 
 ## Commands
 
@@ -59,11 +35,8 @@ Use the installed script `hermes-dmhy` or run the module directly with `PYTHONDO
 ```bash
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli --help
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli validate-config --config fixtures/config/valid.example.json
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli run-once --config config.json --dry-run --feed-file fixtures/dmhy/rss-anime.xml
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli run-once --config config.json --dry-run --feed-file fixtures/dmhy/rss-anime.xml --completed-source-path /sandbox/downloads/Example.mkv
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli run-once --config config.json --apply
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli monitor-once --config config.json --snapshot-json snapshots.json --dry-run
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli monitor-once --config config.json --snapshot-json snapshots.json --apply
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli run-once --config config.json --feed-file fixtures/dmhy/rss-anime.xml
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli monitor-once --config config.json --snapshot-json snapshots.json
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli organize-once --config config.json --job-id job-1 --torrent-hash HASH --title "Example - 01" --source-path /sandbox/download.mkv
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli state --config config.json
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli failures --config config.json
@@ -71,14 +44,7 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscriptio
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli schedule-tick --config config.json --feed-file fixtures/dmhy/rss-anime.xml
 ```
 
-`schedule-tick` is bounded and exits after one tick. By default it remains a safe dry-run and only plans RSS matching/submission. For a real production scheduler, call it with `--apply` after validating the config and environment:
-
-```bash
-# Example cron/no-agent command; keep secrets in environment variables, not config.
-PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src python -m hermes_dmhy_anime_subscription.cli schedule-tick --config /path/to/config.json --apply
-```
-
-`--apply` performs the complete production tick: list all qBittorrent torrents so pre-existing active jobs are not missed after category changes, match those pre-existing active jobs to torrent state (including base32 RSS infohash to qBittorrent hex hash conversion), monitor completed downloads and run the organizer according to config, then submit newly matched RSS items to qBittorrent. It prints a JSON summary suitable for scheduler logs. Apply mode is still guarded by `ensure_apply_safe`: qBittorrent credential env var names and values must exist, webhook URL env values must exist when enabled, Telegram bot token env values must exist when enabled, and `organizer.mode` must be `apply` or `move`.
+`schedule-tick` is bounded and exits after one tick. It performs the complete production tick: list all qBittorrent torrents so pre-existing active jobs are not missed after category changes, match those pre-existing active jobs to torrent state, monitor completed downloads and run the organizer according to config, then submit newly matched RSS items to qBittorrent. It prints a JSON summary suitable for scheduler logs.
 
 The plugin does not install a service or cron job; use your own scheduler to call the bounded command at the configured interval.
 
@@ -145,8 +111,6 @@ Each rule is matched in order. The first accepted rule creates the candidate.
 
 `save_path` is sent as the qBittorrent save path unless a rule overrides it. Use a sandbox path while testing.
 
-Dry-run qBittorrent submission prints the planned payload, makes no HTTP calls, and does not mark feed items as seen in configured state.
-
 ### `polling`
 
 `interval_minutes` must be at least `10`.
@@ -155,15 +119,11 @@ Dry-run qBittorrent submission prints the planned payload, makes no HTTP calls, 
 
 ### `state`
 
-`path` is the SQLite file used for seen feed items, submitted jobs, retry records, failures, organizer outcomes, and archived subscription rules during apply and stateful monitor operations. Dry-run planning uses ephemeral in-memory state for any planned changes, while reading selected existing tables from this file in read-only mode for accurate previews.
-
-Dry-run `run-once` and `schedule-tick` do not initialize or migrate the configured SQLite file. If the file already has `archived_rules` or `satisfied_season_packs` tables, they read those tables in read-only mode to skip archived rules and preserve completed-pack suppressions in previews; a missing file or missing table is treated as no archived rules or satisfied packs.
-
-Archived rules are created only by apply-mode monitoring after a rule with `bangumi_subject_id` has all Bangumi main episodes completed and organized. Once archived, the rule stays in state history and is skipped by future matching; the `state` command includes archived rules in its JSON output.
+`path` is the SQLite file used for seen feed items, submitted jobs, retry records, failures, organizer outcomes, and archived subscription rules. Archived rules are created only by apply-mode monitoring after a rule with `bangumi_subject_id` has all Bangumi main episodes completed and organized. Once archived, the rule stays in state history and is skipped by future matching; the `state` command includes archived rules in its JSON output.
 
 ### `organizer`
 
-`mode` is `dry-run`, `apply`, or the legacy alias `move`. CLI dry-runs force planning even if the config says `apply` or `move`; production organizer runs copy completed media into `library_root` and leave the qBittorrent source files in place for seeding and rechecks.
+`mode` is `apply` or the legacy alias `move`. Production organizer runs copy completed media into `library_root` and leaves the qBittorrent source files in place for seeding and rechecks.
 
 `library_root` is the media library destination root. It is required for `apply` and `move` modes.
 
@@ -194,9 +154,9 @@ The callback receives a privacy-minimized JSON payload with the task, title/text
 
 ### `telegram`
 
-`enabled` turns Telegram episode update delivery on or off. Telegram delivery runs only during non-dry-run monitoring after the organizer successfully applies a video episode action, so download submission, `organize-once`, and dry-run planning do not send chat messages.
+`enabled` turns Telegram episode update delivery on or off. Telegram delivery runs only during monitoring after the organizer successfully applies a video episode action, so download submission and `organize-once` do not send chat messages.
 
-When Telegram is enabled, a successful non-dry-run monitor organizer action first records a durable pending Telegram notification in state. The same non-dry-run monitor pass dispatches pending notifications, and retryable Telegram failures remain queued for later monitor runs. A later `monitor-once --apply` run with `organize=False` or no new organizer result still retries existing queued Telegram notifications. When Telegram is disabled, organizer success does not queue Telegram notifications.
+When Telegram is enabled, a successful monitor organizer action first records a durable pending Telegram notification in state. The same monitor pass dispatches pending notifications, and retryable Telegram failures remain queued for later monitor runs. A later `monitor-once` run with `organize=False` or no new organizer result still retries existing queued Telegram notifications. When Telegram is disabled, organizer success does not queue Telegram notifications.
 
 `bot_token_env` is the environment variable name that contains the Telegram bot token. Do not put the bot token in the config file; literal token-shaped values are rejected. Apply mode requires this env var to be set when Telegram delivery is enabled.
 
@@ -231,7 +191,7 @@ export QBITTORRENT_USERNAME="your-user"
 export QBITTORRENT_PASSWORD="your-password"
 ```
 
-Dry-runs don't use these values. Apply mode logs in with `/api/v2/auth/login`, then posts to `/api/v2/torrents/add` with the magnet or torrent URL, category, tags, and save path.
+Apply mode logs in with `/api/v2/auth/login`, then posts to `/api/v2/torrents/add` with the magnet or torrent URL, category, tags, and save path.
 
 If qBittorrent reports the torrent is already present, the plugin treats that as an idempotent success.
 
@@ -247,13 +207,13 @@ Library Root/
       Series Title - S01E01 - ReleaseGroup [1080p].ass
 ```
 
-If the episode cannot be parsed, the planned destination goes under `_Unsorted/Series Title/` and the action status is `unsorted`.
+If the episode cannot be parsed, the destination goes under `_Unsorted/Series Title/` and the action status is `unsorted`.
 
 The organizer never deletes files. It refuses to overwrite existing destinations. Destination paths must stay contained under `library_root`. Sample, extras, trailer, NCOP, and NCED videos are filtered out. Subtitles with `.ass`, `.srt`, `.ssa`, or `.vtt` are preserved when they match the selected video stem or live beside the selected video.
 
 ## Webhook Payload Example
 
-Webhook payloads are JSON. Disabled webhooks are still planned in dry-run output.
+Webhook payloads are JSON.
 
 ```json
 {
@@ -274,7 +234,6 @@ Webhook payloads are JSON. Disabled webhooks are still planned in dry-run output
   "status": "completed",
   "failure_reason": null,
   "timestamp": "2026-05-24T10:30:00+00:00",
-  "dry_run": true,
   "severity": "info",
   "title": "[ExampleSub] Example Anime - 01 [1080p][CHS]",
   "message": "Download completed"
@@ -291,7 +250,7 @@ qBittorrent auth failure: check that `qbittorrent.username_env` and `qbittorrent
 
 Organizer collision: a destination file already exists. The plugin reports a conflict and does not overwrite. Rename or remove the existing destination yourself before retrying.
 
-Webhook failure: when enabled, the URL must come from `webhook.url_env`. Retryable HTTP and transport failures are recorded as failures. Dry-run only prints planned delivery.
+Webhook failure: when enabled, the URL must come from `webhook.url_env`. Retryable HTTP and transport failures are recorded as failures.
 
 Retry exhaustion: stalled, error, missing, or deleted torrent states increase retry counts. When `retry.max_attempts` is reached, the job is marked failed and appears in `failures`. Use `retry-failed --job-id ...` after fixing the cause.
 
@@ -303,7 +262,7 @@ Operators and CI can run the release-readiness script without live DMHY, qBittor
 PYTHONDONTWRITEBYTECODE=1 python scripts/release_readiness.py
 ```
 
-The script runs repo-native pytest, parses all Python source and test files as a static check, validates the fixture config, runs the fixture e2e dry-run quickstart path in a temp sandbox, and confirms an invalid config fixture is rejected.
+The script runs repo-native pytest, parses all Python source and test files as a static check, validates the fixture config, and confirms an invalid config fixture is rejected.
 
 To prove invalid config failure explicitly:
 
@@ -313,7 +272,7 @@ PYTHONDONTWRITEBYTECODE=1 python scripts/release_readiness.py --config fixtures/
 
 That command exits non-zero and prints the config validation error.
 
-Optional live integration checks are manual and skipped by default. If you run them, use a disposable qBittorrent category and save path, set credential env vars, set the webhook URL env var if enabled, and run `run-once --apply` only after the dry-run output is correct.
+Optional live integration checks are manual and skipped by default. If you run them, use a disposable qBittorrent category and save path, set credential env vars, set the webhook URL env var if enabled, and run `run-once` only against disposable paths first.
 
 ## Tests
 
