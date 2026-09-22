@@ -9,6 +9,108 @@ from hermes_dmhy_anime_subscription.dmhy import DmhyRssClient, build_rss_url, ex
 FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "dmhy"
 
 
+@pytest.mark.parametrize("title", [
+    "[ANi] Example Anime - 11 [1080P]",
+    "[SweetSub] Example Anime [24] [1080p]",
+    "Example Anime 第01話", "Example Anime 第01话", "Example Anime 第01集",
+    "Example Anime ★04", "Example Anime S02E03",
+    "Example Anime Season 2 - 03", "Example Anime S02 - 03",
+    "[Subs] 86 - 01 [1080p]", "Example Anime 2 - 03 [1080p]",
+])
+@pytest.mark.parametrize("category,link,description", [
+    ("動畫", "", "General\nComplete name : Example.mkv"),
+    ("季度全集", "https://example.invalid/?sort_id=31", "合集 batch season pack"),
+])
+def test_pack_classification_single_title_overrides_metadata(title, category, link, description):
+    result = parse_rss(f"""<rss><channel><item>
+      <title>{title}</title><category>{category}</category><link>{link}</link>
+      <description>{description}</description>
+      <enclosure url="magnet:?xt=urn:btih:abc123" />
+    </item></channel></rss>""")
+    assert result.errors == ()
+    assert result.items[0].is_season_pack is False
+
+
+@pytest.mark.parametrize("title,category,description,expected", [
+    ("Example Anime [01-12]", "動畫", "", True),
+    ("Example Anime - 01 - 02 [1080p]", "動畫", "", False),
+    ("Example Anime E01_E12", "動畫", "", True),
+    ("Example Anime S01E01-E12", "動畫", "", True),
+    ("Example Anime Season 2 - 01-12", "動畫", "", True),
+    ("Example Anime [24] Batch", "動畫", "", True),
+    ("Example Anime S02E03 Complete", "動畫", "", True),
+    ("Example Anime 第01話 全集", "動畫", "", True),
+    ("Example Anime full-pack", "動畫", "", True),
+    ("86", "季度全集", "", True),
+    ("[86] [1080p]", "季度全集", "", True),
+    ("[Subs] [86] [1080p]", "季度全集", "", True),
+    ("[Subs] 86 [1080p]", "季度全集", "", True),
+    ("Example Anime [1080]", "季度全集", "", True),
+    ("Example Anime [720p]", "季度全集", "", True),
+    ("Example Anime", "動畫", "General\nComplete name : Example.mkv", False),
+    ("86 [1080p]", "動畫", "", False),
+    ("Example Anime", "動畫", "季度全集", True),
+    ("Example Anime", "動畫", "season pack", True),
+    ("Example Anime", "Complete", "", True),
+])
+def test_pack_classification_title_and_fallback_boundaries(title, category, description, expected):
+    result = parse_rss(f"""<rss><channel><item>
+      <title>{title}</title><category>{category}</category>
+      <description>{description}</description>
+      <enclosure url="magnet:?xt=urn:btih:abc123" />
+    </item></channel></rss>""")
+    assert result.errors == ()
+    assert result.items[0].is_season_pack is expected
+
+
+@pytest.mark.parametrize("title,expected", [
+    ("[Subs] 86 - 99 [1080p]", False),
+    ("86 - 99 [1080p]", False),
+    ("Example [01-12]", True),
+    ("[Subs] Example 01-12", True),
+    ("Example 01-12", True),
+    ("Example [01-02]", True),
+    ("Example 01-02", True),
+    ("Example - 01-02 [1080p]", True),
+    ("Example [01 - 02]", True),
+    ("[Subs] E01_E12", True),
+    ("E01-E02", True),
+])
+@pytest.mark.parametrize("category,link,description", [
+    ("動畫", "", ""),
+    ("季度全集", "https://example.invalid/?sort_id=31", "Complete name : batch.mkv"),
+])
+def test_pack_classification_bare_range_context(title, expected, category, link, description):
+    result = parse_rss(f"""<rss><channel><item>
+      <title>{title}</title><category>{category}</category><link>{link}</link>
+      <description>{description}</description>
+      <enclosure url="magnet:?xt=urn:btih:abc123" />
+    </item></channel></rss>""")
+    assert result.errors == ()
+    assert result.items[0].is_season_pack is expected
+
+
+@pytest.mark.parametrize("title", [
+    "Example Anime - 01 - 02 [1080p]",
+    "Example Anime 第01話-第12話",
+    "Example Anime 第01集至第12集",
+    "作品S01E01 - 12 [1080p]",
+    "Example Anime S01E01-E12v2",
+])
+@pytest.mark.parametrize("category,link,expected", [
+    ("季度全集", "?sort_id=31", True),
+    ("動畫", "", False),
+])
+def test_pack_classification_ambiguous_episode_title_uses_metadata(title, category, link, expected):
+    result = parse_rss(f"""<rss><channel><item>
+      <title>{title}</title><category>{category}</category><link>{link}</link>
+      <description></description>
+      <enclosure url="magnet:?xt=urn:btih:abc123" />
+    </item></channel></rss>""")
+    assert result.errors == ()
+    assert result.items[0].is_season_pack is expected
+
+
 def test_build_rss_url_variants_match_dmhy_shapes():
     assert build_rss_url() == "https://share.dmhy.org/topics/rss/rss.xml"
     assert build_rss_url(keyword="葬送 的 芙莉蓮") == "https://share.dmhy.org/topics/rss/rss.xml?keyword=%E8%91%AC%E9%80%81%20%E7%9A%84%20%E8%8A%99%E8%8E%89%E8%93%AE"

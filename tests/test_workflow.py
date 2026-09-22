@@ -139,6 +139,57 @@ def test_e2e_dry_run_plans_rss_rules_submit_organizer_and_webhook_without_extern
     )
 
 
+@pytest.mark.parametrize("allow_packs", [False, True])
+@pytest.mark.parametrize("title", [
+    "[ANi] Example Anime - 11 [1080P]",
+    "[SweetSub] Example Anime [24] [1080p]",
+])
+def test_run_once_apply_pack_classification_precedence(tmp_path, monkeypatch, allow_packs, title):
+    config_path = _config(tmp_path, organizer_mode="move")
+    raw = json.loads(config_path.read_text(encoding="utf-8"))
+    rule = raw["subscriptions"]["rules"][0]
+    rule["allow_packs"] = allow_packs
+    rule["categories"] = ["動畫", "季度全集"]
+    rule["team_names"] = []
+    config_path.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.setenv("QBITTORRENT_USERNAME", "user")
+    monkeypatch.setenv("QBITTORRENT_PASSWORD", "pass")
+    fake_qbit = FakeQbittorrentClient()
+
+    def apply(rss):
+        return run_once(config_path, dry_run=False, dependencies=WorkflowDependencies(
+            feed_fetcher=lambda _url: rss,
+            qbittorrent_factory=lambda _config: fake_qbit,
+        ))
+
+    # Stale batch category/link and MediaInfo must not create pack job metadata.
+    single = apply(_season_pack_rss(info_hash="a" * 40, guid="single", title=title).replace(
+        "Quarterly complete season pack", "General\nComplete name : Example.mkv"
+    ))
+    assert len(single.candidates) == 1
+    assert single.candidates[0].status == DownloadJobStatus.SUBMITTED.value
+    assert single.candidates[0].candidate.feed_item.is_season_pack is False
+    later = apply(_episode_rss(episode="25", info_hash="b" * 40, guid="later"))
+    assert len(later.candidates) == 1
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert all(not job["metadata"].get("season_pack_satisfaction") for job in state.list_jobs())
+        assert state.list_satisfied_season_packs() == ()
+
+    # A range-only title in the normal anime category must still be a real pack.
+    pack = apply(_episode_rss(episode="01-26", info_hash="c" * 40, guid="pack"))
+    assert len(pack.candidates) == int(allow_packs)
+    if allow_packs:
+        assert pack.candidates[0].candidate.feed_item.is_season_pack is True
+    after_pack = apply(_episode_rss(episode="26", info_hash="d" * 40, guid="after-pack"))
+    assert len(after_pack.candidates) == int(not allow_packs)
+    assert len(fake_qbit.submissions) == 3
+    assert all(dry_run is False for _, _, dry_run in fake_qbit.submissions)
+    with SubscriptionState(tmp_path / "state.sqlite3") as state:
+        assert state.has_seen_item("infohash:" + "a" * 40)
+        assert state.has_seen_item("infohash:" + "b" * 40)
+        assert state.has_seen_item("infohash:" + "d" * 40) is not allow_packs
+
+
 def test_run_once_dry_run_is_repeatable_and_does_not_create_state(tmp_path):
     config_path = _config(tmp_path)
     state_path = tmp_path / "state.sqlite3"

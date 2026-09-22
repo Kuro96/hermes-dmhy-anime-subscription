@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+import re
 from typing import Any
 from urllib.parse import parse_qs, quote, urlparse
 import xml.etree.ElementTree as ET
@@ -169,8 +170,51 @@ def _parse_pubdate(value: str | None) -> datetime | None:
 
 
 def _is_season_pack(category: str | None, link: str, description: str | None, title: str) -> bool:
-    haystack = " ".join(part for part in (category, link, description, title) if part).casefold()
-    return "sort_id=31" in haystack or any(clue.casefold() in haystack for clue in SEASON_PACK_CATEGORY_CLUES)
+    title = title.casefold()
+    if any(clue in title for clue in SEASON_PACK_CATEGORY_CLUES) or re.search(r"\bfull[ -]pack\b", title):
+        return True
+
+    # Remove season labels before checking ranges: Season 2 - 03 is one episode.
+    episode_title = re.sub(r"\b(?:season\s*|s)\d{1,2}(?=\b|e\d)", " ", title)
+    for match in re.finditer(
+        r"(?<!\w)(?:e(?P<explicit>\d{1,3})|(?P<bare>\d{2,3}))"
+        r"\s*[-_]\s*(?:e)?(?P<end>\d{1,3})(?!\w)", episode_title
+    ):
+        if match.group("bare"):
+            # A leading numeric series title is not a range start.
+            prefix = re.sub(r"^\s*\[[^\]]+\]\s*", "", episode_title[:match.start()])
+            if not re.search(r"[^\W_]", prefix):
+                continue
+            # Preserve only the existing spaced '- 01 - 02' title convention.
+            if re.search(r"\s-\s+$", prefix) and re.fullmatch(r"01\s+-\s+02", match.group()):
+                continue
+        if int(match.group("explicit") or match.group("bare")) < int(match.group("end")):
+            return True
+
+    # Multiple episode markers are ambiguous, even when the range syntax above
+    # is unsupported. They must not override explicit batch metadata as singles.
+    episode_markers = re.findall(
+        r"第\s*\d{1,3}\s*[話话集]|★\s*\d{1,3}(?!\w)"
+        r"|(?<![a-z0-9])(?:s\d{1,2})?e\d{1,3}(?:v\d+)?(?![a-z0-9])"
+        r"|\s-\s*\d{1,3}(?:v\d+)?(?=$|[\s\[])", title
+    )
+    if len(episode_markers) <= 1 and re.search(
+        r"第\s*\d{1,3}\s*[話话集]|★\s*\d{1,3}(?!\w)"
+        r"|\bs\d{1,2}e\d{1,3}(?!\w)"
+        r"|\s-\s*\d{1,3}(?:v\d+)?(?=$|[\s\[])", title
+    ):
+        return False
+    for match in re.finditer(r"\[\d{1,3}(?:v\d+)?\]", title):
+        # A leading numeric series title (possibly after a group) is ambiguous.
+        prefix = re.sub(r"^\s*\[[^\]]+\]\s*", "", title[:match.start()])
+        if prefix.strip() and len(episode_markers) <= 1:
+            return False
+
+    metadata = " ".join((category or "", link)).casefold()
+    if "sort_id=31" in metadata or any(clue in metadata for clue in SEASON_PACK_CATEGORY_CLUES):
+        return True
+    # MediaInfo's "Complete name" is not evidence of a complete season.
+    return any(clue in (description or "").casefold() for clue in SEASON_PACK_CATEGORY_CLUES if clue != "complete")
 
 
 def _selector_value(value: int | str, label: str) -> str:
